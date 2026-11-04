@@ -1,5 +1,38 @@
 # SSBU live-state bridge (`tools/mem`)
 
+> **Repository note (2026-11-03).** This repository is the `ssbu-rl` package
+> (`src/rl/`). The recompiled game itself is the separate upstream project
+> [OpenSmash-Ultimate/ssbu-recomp](https://github.com/OpenSmash-Ultimate/ssbu-recomp)
+> and is **not vendored here**. This toolkit needs one small runtime change in
+> that tree — the R2 direct-reset hook and debug-match forcing in
+> `runtime/debug_mode.c` — kept as
+> [`patches/ssbu-recomp-rl.patch`](patches/ssbu-recomp-rl.patch).
+> All credit for the recomp belongs to the upstream authors.
+>
+> The sections below predate the move out of `ssbu-recomp/tools/mem/` and still
+> use `tools/mem/...` paths; see [`MIGRATION.md`](MIGRATION.md) for the current
+> layout and commands.
+
+## Upstream runtime change
+
+The only runtime file this toolkit requires is `runtime/debug_mode.c`. Apply
+the patch in a checkout of `ssbu-recomp`:
+
+```bash
+git -C /path/to/ssbu-recomp apply /path/to/ssbu-rl/patches/ssbu-recomp-rl.patch
+```
+
+It is off by default and activates only with `SSBU_RL=1`. It adds:
+
+* the R2 direct-reset control block (`/dev/shm/ssbu_control.bin`, `SSBC` v1);
+* `SSBU_DEBUG_MATCH` forcing for `p1=cpu|human`, `p2=...`, `players=N`,
+  `cpu=N`, `stage=end`, and the fighter/stage selection used by the recorder.
+
+No other runtime file is needed. The other local modifications in the
+`ssbu-recomp` working tree are unrelated to this repository.
+
+---
+
 Reads Super Smash Bros. Ultimate's live fighter state out of the running
 recompiled game **from another process**, publishes it to POSIX shared memory at
 60 fps, and shows it in a second window so a human can confirm it matches the
