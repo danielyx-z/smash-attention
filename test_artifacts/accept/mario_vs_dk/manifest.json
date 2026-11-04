@@ -1,0 +1,388 @@
+{
+  "episodes": [
+    {
+      "duration_s": 15.0,
+      "file": "episode_0000.npz",
+      "frames": 900,
+      "index": 0,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 0,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          34.0,
+          46.599998474121094
+        ],
+        "duration_s": 15.0,
+        "fight_on": 0,
+        "finished_ns": 1793607517159792001,
+        "frames": 900,
+        "match_state": 2,
+        "seq_end": 5232,
+        "seq_gaps": 0,
+        "seq_start": 3434,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 5232,
+      "seq_gaps": 0,
+      "seq_start": 3434,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 16.366666666666667,
+      "file": "episode_0001.npz",
+      "frames": 982,
+      "index": 1,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 1,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          34.553672790527344,
+          69.89237213134766
+        ],
+        "duration_s": 16.366666666666667,
+        "fight_on": 0,
+        "finished_ns": 1793607549643131304,
+        "frames": 982,
+        "match_state": 2,
+        "seq_end": 9130,
+        "seq_gaps": 0,
+        "seq_start": 7168,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 9130,
+      "seq_gaps": 0,
+      "seq_start": 7168,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 15.883333333333333,
+      "file": "episode_0002.npz",
+      "frames": 953,
+      "index": 2,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 2,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          32.0,
+          48.756935119628906
+        ],
+        "duration_s": 15.883333333333333,
+        "fight_on": 0,
+        "finished_ns": 1793607581676450243,
+        "frames": 953,
+        "match_state": 2,
+        "seq_end": 12974,
+        "seq_gaps": 0,
+        "seq_start": 11070,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 12974,
+      "seq_gaps": 0,
+      "seq_start": 11070,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 17.666666666666668,
+      "file": "episode_0003.npz",
+      "frames": 1060,
+      "index": 3,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 3,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          60.0,
+          85.55000305175781
+        ],
+        "duration_s": 17.666666666666668,
+        "fight_on": 0,
+        "finished_ns": 1793607615394285135,
+        "frames": 1060,
+        "match_state": 2,
+        "seq_end": 17020,
+        "seq_gaps": 0,
+        "seq_start": 14902,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 17020,
+      "seq_gaps": 0,
+      "seq_start": 14902,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 18.366666666666667,
+      "file": "episode_0004.npz",
+      "frames": 1102,
+      "index": 4,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 4,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          79.29998779296875,
+          80.24999237060547
+        ],
+        "duration_s": 18.366666666666667,
+        "fight_on": 0,
+        "finished_ns": 1793607654494280312,
+        "frames": 1102,
+        "match_state": 2,
+        "seq_end": 21712,
+        "seq_gaps": 0,
+        "seq_start": 19510,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 21712,
+      "seq_gaps": 0,
+      "seq_start": 19510,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 16.866666666666667,
+      "file": "episode_0005.npz",
+      "frames": 1012,
+      "index": 5,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 5,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          66.33363342285156,
+          51.3941535949707
+        ],
+        "duration_s": 16.866666666666667,
+        "fight_on": 0,
+        "finished_ns": 1793607687296470181,
+        "frames": 1012,
+        "match_state": 2,
+        "seq_end": 25648,
+        "seq_gaps": 0,
+        "seq_start": 23626,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 25648,
+      "seq_gaps": 0,
+      "seq_start": 23626,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 16.616666666666667,
+      "file": "episode_0006.npz",
+      "frames": 997,
+      "index": 6,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 6,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          55.92000198364258,
+          50.67499923706055
+        ],
+        "duration_s": 16.616666666666667,
+        "fight_on": 0,
+        "finished_ns": 1793607719596439631,
+        "frames": 997,
+        "match_state": 2,
+        "seq_end": 29524,
+        "seq_gaps": 0,
+        "seq_start": 27532,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 29524,
+      "seq_gaps": 0,
+      "seq_start": 27532,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 19.833333333333332,
+      "file": "episode_0007.npz",
+      "frames": 1190,
+      "index": 7,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 7,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          51.5,
+          42.5
+        ],
+        "duration_s": 19.833333333333332,
+        "fight_on": 0,
+        "finished_ns": 1793607755655965897,
+        "frames": 1190,
+        "match_state": 2,
+        "seq_end": 33852,
+        "seq_gaps": 0,
+        "seq_start": 31474,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 33852,
+      "seq_gaps": 0,
+      "seq_start": 31474,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 17.133333333333333,
+      "file": "episode_0008.npz",
+      "frames": 1028,
+      "index": 8,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 8,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          99.68973541259766,
+          32.0
+        ],
+        "duration_s": 17.133333333333333,
+        "fight_on": 0,
+        "finished_ns": 1793607794956683856,
+        "frames": 1028,
+        "match_state": 2,
+        "seq_end": 38568,
+        "seq_gaps": 0,
+        "seq_start": 36514,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 38568,
+      "seq_gaps": 0,
+      "seq_start": 36514,
+      "stage_id": 3
+    },
+    {
+      "duration_s": 18.3,
+      "file": "episode_0009.npz",
+      "frames": 1098,
+      "index": 9,
+      "meta": {
+        "build": "ssbu-recomp@fea28c18b785",
+        "cpu_level": 9,
+        "index": 9,
+        "p1_char": "mario",
+        "p2_char": "donkey_kong",
+        "stage": "final_destination",
+        "stage_id": 3
+      },
+      "result": {
+        "damage": [
+          26.402061462402344,
+          96.25574493408203
+        ],
+        "duration_s": 18.3,
+        "fight_on": 0,
+        "finished_ns": 1793607829325395860,
+        "frames": 1098,
+        "match_state": 2,
+        "seq_end": 42692,
+        "seq_gaps": 0,
+        "seq_start": 40498,
+        "stocks": [
+          0,
+          0
+        ],
+        "winner": null
+      },
+      "seq_end": 42692,
+      "seq_gaps": 0,
+      "seq_start": 40498,
+      "stage_id": 3
+    }
+  ],
+  "format": "ssbu_gym_record_v1",
+  "frame_skip": 5,
+  "hz": 60.0,
+  "updated_ns": 1793607829329620538
+}

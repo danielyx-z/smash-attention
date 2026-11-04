@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssbu-rl"
+version = "0.1.0"
+description = "SSBU RL toolkit: memory bridge, gym env, behaviour cloning"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Daniel", email = "daniel@example.com"}]
+dependencies = [
+    "gymnasium>=1.4",
+    "numpy>=1.24",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rl*"]
+
+[project.scripts]
+rl-wait-live = "rl.scripts.wait_live:main"
+rl-record = "rl.record.gym_record:main"
+rl-train = "rl.bc.gym_bc:main"
+rl-eval = "rl.bc.gym_eval:main"
+rl-probe = "rl.memory.probe:main"
+
+[tool.setuptools.package-data]
+"rl.memory" = ["memmap.json"]
+"rl.extra" = ["extra_map.json"]
+
+[tool.setuptools.package-dir]
+"" = "src"

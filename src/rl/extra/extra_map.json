@@ -1,0 +1,364 @@
+{
+  "version": 1,
+  "updated": "2026-11-01T23:55:00-07:00",
+  "owner": "Agent F (extras)",
+  "purpose": "Raw-only extra live game state. Never part of the policy observation and never a dependency of the core reader.",
+
+  "format": {
+    "path": "/dev/shm/ssbu_extra.bin",
+    "size": "fixed 1 MiB (MAX_BLOCK); the header says how many bytes are meaningful",
+    "concurrency": "single writer, many readers, no locks: seq is ODD while the body is being written and EVEN when it is complete (same protocol as the core block)",
+    "header": {
+      "fmt": "<4sIIQIII",
+      "size": 32,
+      "fields": [
+        {"off": 0,  "name": "magic",       "type": "4s", "value": "SSBX"},
+        {"off": 4,  "name": "version",     "type": "u32", "value": 1},
+        {"off": 8,  "name": "seq",         "type": "u32"},
+        {"off": 12, "name": "ts_ns",       "type": "u64", "note": "CLOCK_MONOTONIC"},
+        {"off": 20, "name": "count",       "type": "u32", "note": "record count"},
+        {"off": 24, "name": "total_bytes", "type": "u32", "note": "32 + sum(record bytes); ignore the rest of the 1 MiB"},
+        {"off": 28, "name": "flags",       "type": "u32", "note": "bit0 live match, bit1 a getter was decoded live"}
+      ]
+    },
+    "record": {
+      "fmt": "<48sBBBBI",
+      "size": 56,
+      "fields": [
+        {"off": 0,  "name": "name",     "type": "char[48]", "note": "NUL-padded ASCII; max 47 bytes"},
+        {"off": 48, "name": "type",     "type": "u8"},
+        {"off": 49, "name": "verified", "type": "u8", "note": "1 = the offset was proven by disassembly and the value passed its sanity check this frame"},
+        {"off": 50, "name": "index",    "type": "u8", "note": "0 global, 1 = fighter entry 0/P1, 2 = entry 1/P2, 3+ = battle-object slot"},
+        {"off": 51, "name": "reserved", "type": "u8"},
+        {"off": 52, "name": "length",   "type": "u32", "note": "value bytes"},
+        {"off": 56, "name": "value",    "type": "bytes", "note": "little-endian, zero-padded to an 8-byte boundary"}
+      ]
+    },
+    "types": {
+      "0": "i64", "1": "f64", "2": "raw bytes", "3": "bool (u8)",
+      "4": "u32", "5": "vec3f (12 bytes)", "6": "vec4f (16 bytes)",
+      "7": "utf-8 str"
+    },
+    "reader": "tools/mem/extra_state.py: unpack_block()/read_block() parse and validate magic/version/count/total/padding",
+    "writer": "tools/mem/extra_state.py --duration N (60 Hz by default)"
+  },
+
+  "bases": {
+    "guest_image_base": "/proc/<pid>/maps: anonymous r--p offset-0 region (tools/mem/memapi.py)",
+    "symbol_offsets": "main.elf .dynsym (tools/mem/elfsym.py)",
+    "guest_absolute_constants": "debug_mode.c uses 0x7100000000-relative constants; extra_state._g() maps them onto the live base"
+  },
+
+  "module_table": {
+    "note": "accessor-relative pointers, proven by the first instruction of each lua_bind *_impl thunk: ldr x0,[x0,#N] followed by vtable dispatch",
+    "acc+0x38": "PostureModule",
+    "acc+0x40": "StatusModule",
+    "acc+0x48": "ControlModule (B's map)",
+    "acc+0x50": "WorkModule",
+    "acc+0x58": "GroundModule",
+    "acc+0x68": "KineticModule",
+    "acc+0x88": "MotionModule",
+    "acc+0x90": "StopModule   (StopModule__is_stop_impl: ldr x0,[x0,#144])",
+    "acc+0xA8": "DamageModule",
+    "acc+0xB0": "HitModule    (HitModule__set_invincible_frame_global_impl: ldr x0,[x0,#176])",
+    "acc+0x100": "ShieldModule (ShieldModule__is_shield_impl: ldr x0,[x0,#256])",
+    "acc+0x128": "CancelModule"
+  },
+
+  "vtable_convention": {
+    "note": "the live module's first qword is its vtable; entries are guest-absolute function pointers. The lua_bind thunk loads vtable[byte_offset/8]. The observed ShieldModule vtable was 0x7104f71a90 and every entry was a guest-image text pointer (0x71004c....).",
+    "dynamic_decode": "extra_state.decode_getter() reads the concrete getter's first instructions at run time and decodes ldr/ldrb/ldrsh/ldr s/q, ldr x0,[x0,#imm] and add x0,x0,#imm; it only accepts a load whose next instruction is ret. Every successful decode is evidence for that field in this build."
+  },
+
+  "evidence": {
+    "ShieldModule__is_shield_internal": {
+      "thunk": "0x2075100: ldr x0,[x0,#256]; ldr x8,[x0]; ldr x3,[x8,#136]; br x3",
+      "slot": "0x88 / 8 = 17",
+      "live_target": "guest 0x7104c5de0 (ELF offset 0x4c5de0)",
+      "asm": "ldrb w8,[x0,#127]; cbz w8,..; mov w0,wzr; ret; ... ldr x8,[x0,#24]; mov w9,#0x34; smaddl x8,w2,w9,x8; ldr x9,[x0,#40]; ldrsh w8,[x8,#4]; add w8,w8,w1; mov w10,#0x50; smaddl x8,w8,w10,x9; ldr w8,[x8,#64]; cset w0,ne",
+      "conclusion": "module+0x7F = no-shield flag; part array at module+0x18, stride 0x34; node array at module+0x28, stride 0x50; node+0x40 != 0 marks the part shielding. Published as f.shield.likely (proxy, verified=false)."
+    },
+    "ShieldModule__get_part_size": {
+      "thunk": "0x2075280: ldr x0,[x0,#256]; ldr x1,[x8,#328]",
+      "slot": "41",
+      "live_target": "0x4c6190",
+      "asm": "ldr x8,[x0,#24]; mov w9,#0x34; smaddl x8,w1,w9,x8; ldrsh w0,[x8,#6]; ret",
+      "conclusion": "part array = *(module+0x18), stride 0x34; size = i16 at part+0x06"
+    },
+    "ShieldModule__get_lr": {
+      "thunk": "0x2075300: vtable+416", "slot": "52", "live_target": "0x4c6ad0",
+      "asm": "ldr x8,[x0,#24]; smaddl x8,w1,0x34,x8; ldr s0,[x8,#16]; ret",
+      "conclusion": "f32 at part+0x10"
+    },
+    "ShieldModule__get_life_mul": {
+      "thunk": "0x2075230: vtable+272", "slot": "34", "live_target": "0x4c60e0",
+      "asm": "ldr s0,[x8,#36]; ret", "conclusion": "f32 at part+0x24",
+      "note": "life_mul is a multiplier, not the shield HP; no lua_bind getter exposes an absolute shield HP"
+    },
+    "ShieldModule__get_pos_x": {
+      "thunk": "0x2075320: vtable+432", "slot": "54", "live_target": "0x4c6b00",
+      "asm": "ldr s0,[x8,#8]; ret", "conclusion": "f32 at part+0x08"
+    },
+    "ShieldModule__get_hop_angle": {
+      "thunk": "0x2075170: vtable+192", "slot": "24", "live_target": "0x4c5fa0",
+      "asm": "ldr s0,[x8,#20]; ret", "conclusion": "f32 at part+0x14"
+    },
+    "ShieldModule__get_attack_mul": {
+      "thunk": "0x20751f0: vtable+240", "slot": "30", "live_target": "0x4c6060",
+      "asm": "ldr s0,[x8,#24]; ret", "conclusion": "f32 at part+0x18"
+    },
+    "ShieldModule__get_speed_mul": {
+      "thunk": "0x2075210: vtable+256", "slot": "32", "live_target": "0x4c60a0",
+      "asm": "ldr s0,[x8,#28]; ret", "conclusion": "f32 at part+0x1C"
+    },
+    "ShieldModule__get_attack_limit": {
+      "thunk": "0x2075250: vtable+288", "slot": "36", "live_target": "0x4c6120",
+      "asm": "ldr s0,[x8,#32]; ldr s1,[x0,#128]; fmul s0,s0,s1; ret",
+      "conclusion": "part+0x20 multiplied by module+0x80 (global limit)"
+    },
+    "ShieldModule__set_size": {
+      "thunk": "0x2075110: vtable+144", "slot": "18", "live_target": "0x4c5e20",
+      "asm": "ldr x8,[x0,#24]; smaddl x8,w2,0x34,x8; ldr x9,[x0,#40]; ldrsh w8,[x8,#4]; add w8,w8,w1; mov w10,#0x50; smaddl x8,w8,w10,x9; str s0,[x8,#32]; ret",
+      "conclusion": "bubble node = *(module+0x28) + 0x50*(part[+4] + arg); node+0x20 = size (f32)"
+    },
+    "ShieldModule__get_center_pos": {
+      "thunk": "0x20752f0: vtable+408", "slot": "51", "live_target": "0x4c6a80",
+      "asm": "ldr x8,[x0,#24]; ... ldrsw x8,[part]; ldr x9,[x0,#80]; mov w10,#0x2d0; madd x8,x8,w10,x9; add x8,x8,w1<<3; ldr x0,[x8,#48]; ldr x8,[x0]; ldr x8,[x8,#32]; blr x8; ldr q0,[x0]; ret",
+      "conclusion": "slot node = *(module+0x50) + 0x2D0*part[0].i32; node+0x30 = position object; vtable[4] returns its vector"
+    },
+    "ShieldModule__set_hit_stop_mul": {
+      "thunk": "0x2075260: vtable+304", "slot": "38", "live_target": "0x4c6150",
+      "asm": "str s0,[x0,#132]; ret", "conclusion": "module+0x84 = hit-stop multiplier (not the current hitlag)"
+    },
+
+    "DamageModule__damage": {
+      "thunk": "0x200b700: ldr x0,[x0,#168]; ldr x2,[x8,#200]",
+      "slot": "25", "live_target": "0x3ff9f0",
+      "asm": "ldr x8,[x0,#24]; mov w9,#0x1c0; smull x9,w1,w9; ldr s0,[x8,x9]; ret",
+      "conclusion": "hit record array = *(module+0x18), stride 0x1C0; damage f32 at +0x00"
+    },
+    "DamageModule__reaction": {
+      "thunk": "0x200b710: vtable+208", "slot": "26", "live_target": "0x3ffa10",
+      "asm": "ldr x8,[x0,#24]; smaddl x8,w1,0x1c0,x8; ldr s0,[x8,#16]; ret",
+      "conclusion": "reaction f32 at hit-record+0x10"
+    },
+    "DamageModule__power_max": {
+      "thunk": "0x200b720: vtable+216", "slot": "27", "live_target": "0x3ffa30",
+      "asm": "ldr s0,[x8,#12]; ret", "conclusion": "power_max f32 at hit-record+0x0C"
+    },
+    "DamageModule__is_no_reaction_mode_perfect": {
+      "thunk": "0x200b790: vtable+304", "slot": "38", "live_target": "0x3ffcd0",
+      "asm": "ldrb w0,[x0,#69]; ret", "conclusion": "byte at module+0x45"
+    },
+    "DamageModule__is_damage_lock": {
+      "thunk": "0x200b890: ldr x0,[x0,#168]; ldr x1,[x8,#600]", "slot": "75",
+      "conclusion": "slot 75 (beyond the 64-entry prefix of the first live dump); extra_state decodes the live getter"
+    },
+    "DamageModule__is_paralyze": {
+      "thunk": "0x200b8f0: vtable+680", "slot": "85",
+      "conclusion": "extra_state decodes the live getter"
+    },
+    "DamageModule__is_critical_hit": {
+      "thunk": "0x200b920: vtable+728", "slot": "91",
+      "conclusion": "extra_state decodes the live getter"
+    },
+    "DamageModule__is_capture_cut": {
+      "thunk": "0x200b7c0: vtable+472", "slot": "59"
+    },
+
+    "StopModule__is_stop": {"thunk": "0x20891f0: ldr x0,[x0,#144]; ldr x1,[x8,#136]", "slot": "17"},
+    "StopModule__is_hit": {"thunk": "0x2089210: vtable+152", "slot": "19"},
+    "StopModule__is_damage": {"thunk": "0x2089220: vtable+160", "slot": "20"},
+    "StopModule__get_hit_stop_real_frame": {
+      "thunk": "0x2089250: ldr x0,[x0,#144]; ldr x1,[x8,#200]", "slot": "25",
+      "conclusion": "the engine's real hitlag length (hit-stop frames), published as f.stop.hit_stop_frame after live decoding"
+    },
+
+    "GroundModule__get_offset_x": {
+      "thunk": "0x20299b0: ldr x0,[x0,#88]; ldr x1,[x8,#304]", "slot": "38",
+      "live_target": "0x45fdf0", "asm": "ldr s0,[x0,#80]; ret",
+      "conclusion": "offset_x f32 at module+0x50"
+    },
+    "GroundModule__get_offset_y": {
+      "thunk": "0x20299c0: vtable+312", "slot": "39", "live_target": "0x45fe00",
+      "asm": "ldr s0,[x0,#84]; ret", "conclusion": "offset_y f32 at module+0x54"
+    },
+    "GroundModule__get_z": {"thunk": "0x2029df0: vtable+904", "slot": "113"},
+    "GroundModule__get_touch_flag": {"thunk": "0x2029f50: vtable+1128", "slot": "141"},
+    "GroundModule__is_touch": {"thunk": "0x2029fa0: vtable+1184", "slot": "148"},
+    "GroundModule__is_attach": {"thunk": "0x2029e60: vtable+968", "slot": "121"},
+    "GroundModule__can_entry_cliff": {"thunk": "0x2029bb0: vtable+608", "slot": "76"},
+    "GroundModule__is_attach_cliff": {"thunk": "0x202a3a0: vtable+1808", "slot": "226"},
+    "GroundModule__center_pos": {"thunk": "0x202a070: vtable+1440", "slot": "180"},
+    "GroundModule__get_down_pos": {"thunk": "0x202a030: vtable+1408", "slot": "176"},
+    "GroundModule__get_shape_kind": {"thunk": "0x2029dd0: vtable+888", "slot": "111"},
+
+    "KineticModule__get_sum_speed_x": {
+      "thunk": "0x2043a00: ldr x0,[x0,#104]; ldr x2,[x8,#200]", "slot": "25",
+      "live_target": "0x47a890", "asm": "calls vtable[24] then returns s0",
+      "conclusion": "vx is the x component of the vector returned by vtable[24]"
+    },
+    "KineticModule__get_sum_speed": {
+      "thunk": "0x20439f0: vtable+192", "slot": "24", "live_target": "0x47a760",
+      "asm": "ldrb w8,[x0,#444]; ldr x21,[x0,#32]; loop: madd x8,i,#0x18,module; ldr w9,[x8,#0x3c]; tst w9,mask; ldr x0,[x8,#0x30]; ldrb w8,[x0,#0x30]; blr vtable[4]; add vectors",
+      "conclusion": "count at module+0x20; entries at module+0x30 stride 0x18; entry+0 object, entry+0xC flag mask; object+0x30 enabled; object vtable[4] returns &velocity. extra_state replicates the sum for mask=all (get_sum_speed(-1))."
+    },
+    "KineticModule__get_sum_speed_y": {"thunk": "0x2043a10: vtable+208", "slot": "26", "live_target": "0x47a8b0", "asm": "calls vtable[24]; mov s0,v0.s[1]"},
+    "KineticModule__get_kinetic_type": {"thunk": "0x2043ac0: vtable+288", "slot": "36"},
+
+    "MotionModule__frame": {"thunk": "0x205cc70: ldr x1,[x8,#112]", "slot": "14", "getter": "0x49bf50: ldr s0,[x0,#112]; ret", "conclusion": "frame f32 at module+0x70"},
+    "MotionModule__motion_kind": {"thunk": "0x205cc20: ldr x0,[x0,#136]; ldr x1,[x8,#312]", "slot": "39"},
+    "MotionModule__is_end": {"thunk": "0x205cd90: vtable+456", "slot": "57"},
+    "MotionModule__is_looped": {"thunk": "0x205cda0: vtable+464", "slot": "58"},
+    "MotionModule__is_flip": {"thunk": "0x205d050: vtable+912", "slot": "114"},
+    "MotionModule__rate": {"thunk": "0x205cc30: vtable+320", "slot": "40"},
+    "MotionModule__prev_frame": {"thunk": "0x205cc80: vtable+360", "slot": "45"},
+    "MotionModule__end_frame": {"thunk": "0x205ccd0: vtable+384", "slot": "48"},
+    "MotionModule__is_loop_flag": {"thunk": "0x205cdb0: vtable+504", "slot": "63"},
+
+    "WorkModule__get_int": {"thunk": "0x208dbc0: ldr x0,[x0,#80]; ldr x2,[x8,#152]", "slot": "19", "getter": "0x4e4600"},
+    "WorkModule__get_float": {"thunk": "0x208db50: vtable+88", "slot": "11", "getter": "0x4e4420"},
+    "WorkModule__is_flag": {
+      "thunk": "0x208dc80: vtable+264", "slot": "33", "getter": "0x4e4900",
+      "asm": "ldr x9,[x0,#24]; ubfx w8,w1,#24,#4; ldr x8,[x9,w8<<3]; ubfx w10,w1,#5,#19; lsl w9,1,w1; ldr x8,[x8,#48]; ldr w8,[x8,w10<<2]; tst w8,w9; cset w0,ne",
+      "conclusion": "kind array = module+0x18; kind+0x30 = u32 flags; flag id decodes kind=(id>>24)&0xF, word=(id>>5)&0x7FFFF, bit=id&0x1F"
+    },
+    "WorkModule__is_enable_transition_term": {
+      "thunk": "0x208dd60: vtable+384", "slot": "48",
+      "asm_lua_bind": "ldr x9,[x0,#40]; and w8,w1,#0xffffff; ldrb w10,[x9,x8]; ...",
+      "conclusion": "terms = *(module+0x28), one byte per term; enabled = 0 if b&0x38 else ((b>>2)&1) if b&2 else (b&1)"
+    },
+    "WorkModule__kind0_arrays": {
+      "conclusion": "int array = *(kind0+0x20) (B's jumps_left evidence), float array = *(kind0+0x10) (get_float dispatch), flags = *(kind0+0x30) (is_flag)"
+    },
+
+    "FighterManager__get_fighter_information": {
+      "thunk": "0x2140fc0: ldr x8,[x0]; add x8,x8,index<<3; ldr x8,[x8,#32]; add x0,x8,#0xF0",
+      "conclusion": "entry+0xF0 is the FighterInformation object; entry+0xF8 is object+8 = its data record"
+    },
+    "FighterInformation__stock_count": {
+      "thunk": "0x20c9e80: ldr x8,[x0,#8]; ldr w0,[x8,#216]; ret",
+      "conclusion": "u32 at record+0xD8"
+    },
+    "FighterInformation__dead_count": {
+      "thunk": "0x20c9e50: ldr x8,[x0,#8]; ... ldr w9,[x8,#204]; ldr w10,[x8,#208]; ldr w8,[x8,#212]; sum; or [x8,#204+4*index]",
+      "conclusion": "u32 dead[3] at record+0xCC/+0xD0/+0xD4 (0xD4 is also the per-type total)"
+    },
+    "FighterInformation__is_on_rebirth": {"thunk": "0x20c9f10: ldr x8,[x0,#8]; ldrb w0,[x8,#908]", "conclusion": "u8 at record+0x38C"},
+    "FighterInformation__fighter_category": {"thunk": "0x20c9f20: ldrb w0,[x8,#940]", "conclusion": "u8 at record+0x3AC"},
+    "FighterInformation__fighter_color": {"thunk": "0x20c9dc0: ldrb w0,[x8,#81]", "conclusion": "u8 at record+0x51"},
+    "FighterInformation__is_operation_cpu": {"thunk": "0x20c9e30: ldrb w0,[x8,#146]", "conclusion": "u8 at record+0x92"},
+    "FighterInformation__gravity": {"thunk": "0x20c9f30: ldr s0,[x8,#876]", "conclusion": "f32 at record+0x36C"},
+    "FighterInformation__hit_point_max": {"thunk": "0x20c9da0: ldr s0,[x8,#56]; ldr s1,[x8,#60]; fadd", "conclusion": "f32 at record+0x38 and +0x3C"},
+    "FighterInformation__is_last_dead_suicide": {"thunk": "0x20c9ef0: ldrb w0,[x8,#419]", "conclusion": "u8 at record+0x1A3"},
+    "FighterInformation__get_log_int": {
+      "thunk": "0x20c9fa0: ldr x8,[x0,#8]; mov w9,#0x11b0; smaddl x8,w3,w9,x8; add x8,x8,w1<<3; ldr x8,[x8,#5600]; ldr w0,[x8,w2<<2]",
+      "conclusion": "log type<3: record + 0x11B0*type + 8*index + 0x15E0 -> pointer to an int array; field index2 selects the u32. Published raw only (meaning not decoded)."
+    },
+
+    "BattleObjectManager__is_active_find_battle_object": {
+      "thunk": "0x1fca0b0: calls 0x3ac560 with the object id",
+      "resolver": "0x3ac560: ldr x8,[0x52b7548]; pools = manager+8*k; pool+0x18 count, pool+8 array; strides [0xF940,0x3C30,0x60C0,0x300,0x2B0]; slot+8 = u32 object id; slot+0x3A byte > 3",
+      "conclusion": "enumeration is a read-only pointer walk; the entry layout beyond +0x3A and +0x20 is not fully decoded yet (published raw)"
+    },
+    "BattleObjectManager__singleton": {
+      "symbol": "_ZN3lib9SingletonIN3app19BattleObjectManagerEE9instance_E",
+      "offset": "0x52b6a00",
+      "note": "the singleton cell exists; the pool manager above is the one the lua_bind resolver uses (0x52b7548). Both are published."
+    },
+
+    "StageManager": {
+      "symbol": "_ZN3lib9SingletonIN3app12StageManagerEE9instance_E",
+      "offset": "0x53299d8",
+      "chain": "cell -> object -> [object] = impl; impl+0x17C = stage id/index; impl+0x110 + 8*i = stage object pointers (is_discretion_final_enabled reads impl+0x110+8*index and vtable[148])",
+      "conclusion": "stage id matches B's independent chain; stage objects are published raw (geometry not decoded)"
+    },
+    "match_block": {
+      "guest_abs": "0x71052c41b0",
+      "source": "runtime/debug_mode.c MELEE_INFO",
+      "fields": {
+        "+0x00": "u8 melee mode (debug: 1 for a Local Wireless room match, 0 local versus)",
+        "+0x05": "u8 rule kind (1 = stock)",
+        "+0x0A": "u8 stock count",
+        "+0x54": "u32 item appear",
+        "+0x420": "u32 stage id (debug mode prints it)",
+        "+0x588": "player records, 0x260 each"
+      },
+      "raw": "g.match.raw0x100 + g.match.fnv1a",
+      "note": "match timer and a real game frame counter are not decoded yet"
+    },
+    "rng": {
+      "guest_abs": "0x71052381c0",
+      "source": "debug_mode.c rollback seed generator",
+      "conclusion": "16 bytes / 4 u32, published as g.rng.word0..3"
+    },
+    "camera": {
+      "chain": "*(BossManager::instance_+8) -> a -> manager",
+      "fields": {
+        "+0xC20": "4 f32 camera range",
+        "+0xC30": "4 f32 dead area (left,right,top,bottom); app::camera::get_dead_area",
+        "+0xD20": "4 f32 get_target (sv_camera_manager::get_target reads +3360)",
+        "+0xD30": "4 f32 get_pos (+3376)",
+        "+0xEB0": "4 f32 internal_target / app::camera::target_pos (+3760)",
+        "+0xEC0": "4 f32 internal_pos (+3776)",
+        "+0xDAC": "f32 get_fov (+3500)"
+      },
+      "conclusion": "published as g.camera.*; the bounds agree with B's live blast zones"
+    }
+  },
+
+  "records": {
+    "naming": "g.* global; f.* per fighter with index 1=P1/entry0, 2=P2/entry1; bom.obj.* with index = object slot",
+    "verified_meaning": "1 = offset proven by the disassembly above AND the read passed a type/range check; 0 = raw/derived/proxy",
+    "groups": {
+      "globals": ["g.base", "g.ready_go", "g.fighter_manager", "g.stage_id", "g.stage_impl", "g.stage_obj0..2", "g.stage_obj_cur", "g.match.rule_kind", "g.match.stock", "g.match.item_appear", "g.match.melee_mode", "g.match.stage_id_raw", "g.match.raw0x100", "g.match.fnv1a", "g.rng.raw16", "g.rng.word0..3", "g.camera.*", "g.bom.*"],
+      "fighter_info": ["f.info.kind", "f.info.stock", "f.info.dead_count", "f.info.dead_total", "f.info.is_on_rebirth", "f.info.category", "f.info.color", "f.info.gravity", "f.info.hit_point_max", "f.info.is_cpu", "f.info.is_last_dead_suicide", "f.info.log{t}.ptr", "f.info.log{t}.raw0x40"],
+      "shield": ["f.shield.ptr", "f.shield.no_flag", "f.shield.part_count", "f.shield.parts", "f.shield.nodes", "f.shield.slots", "f.shield.part{i}.raw", "f.shield.part{i}.size_s16", "f.shield.part{i}.pos_x", "f.shield.part{i}.lr", "f.shield.part{i}.hop_angle", "f.shield.part{i}.attack_mul", "f.shield.part{i}.speed_mul", "f.shield.part{i}.attack_limit", "f.shield.part{i}.life_mul", "f.shield.node{i}.raw", "f.shield.node{i}.size", "f.shield.attack_limit_global", "f.shield.hit_stop_mul", "f.shield.center", "f.shield.likely"],
+      "damage": ["f.damage.ptr", "f.damage.array", "f.damage.amount", "f.damage.power_max", "f.damage.reaction", "f.damage.rec0.raw0x40", "f.damage.is_lock", "f.damage.is_paralyze", "f.damage.is_critical", "f.damage.is_capture_cut", "f.damage.no_reaction_perfect", "f.damage.no_reaction.byte44/45"],
+      "stop": ["f.stop.ptr", "f.stop.is_stop", "f.stop.is_hit", "f.stop.is_damage", "f.stop.hit_stop_frame"],
+      "ground": ["f.ground.ptr", "f.ground.offset_x", "f.ground.offset_y", "f.ground.touch_flag", "f.ground.is_attach", "f.ground.can_entry_cliff", "f.ground.is_attach_cliff", "f.ground.is_status_cliff", "f.ground.shape_kind", "f.ground.z", "f.ground.center", "f.ground.down", "f.ground.floor_y"],
+      "kinetic": ["f.kinetic.ptr", "f.kinetic.count", "f.kinetic.entry{i}.object", "f.kinetic.entry{i}.flags", "f.kinetic.entry{i}.enabled", "f.kinetic.entry{i}.vel", "f.kinetic.engine_vel", "f.kinetic.engine_speed", "f.kinetic.type"],
+      "motion": ["f.motion.ptr", "f.motion.frame", "f.motion.kind", "f.motion.is_end", "f.motion.is_looped", "f.motion.is_flip", "f.motion.is_blend", "f.motion.is_changing", "f.motion.is_loop_flag", "f.motion.rate", "f.motion.prev_frame", "f.motion.end_frame"],
+      "work": ["f.work.ptr", "f.work.terms_ptr", "f.work.terms", "f.work.term_count", "f.work.term_mask0..3", "f.work.kind0", "f.work.ints", "f.work.floats", "f.work.flags", "f.cancel.enable"],
+      "battle_objects": ["bom.obj.kind", "bom.obj.id", "bom.obj.raw0x60", "bom.obj.byte3a", "bom.obj.accessor", "bom.obj.pos", "bom.obj.status_kind"]
+    }
+  },
+
+  "unverified": {
+    "shield_hp": {
+      "status": "unknown",
+      "tried": ["all 39 ShieldModule lua_bind symbols", "concrete vtable getters", "part/node arrays"],
+      "note": "the game exposes no absolute shield HP getter; life_mul is a multiplier. part+0x06 is the shield part size, not HP. The raw 0x34-byte part and 0x50-byte node blobs are published so the HP-like field can be identified later (a shield must be active to correlate)."
+    },
+    "damage_lock_paralyze_critical": {
+      "status": "dynamic",
+      "note": "slots 75/85/91 are past the 64-entry prefix of the first live vtable dump; extra_state decodes the concrete getter at run time and publishes the field only if the decode succeeds."
+    },
+    "ground_cliff_id": {
+      "status": "partial",
+      "note": "can_entry_cliff/is_attach_cliff are decoded; a numeric cliff id would need can_entry_cliff_hang_data (0x2029bd0) whose return is a hang-data struct, not decoded."
+    },
+    "distance_to_floor": {
+      "status": "derived",
+      "note": "f.ground.floor_y uses the vector returned by get_center_pos; a true distance requires the ground contact point (get_touch_pos needs a touch id) and is not yet proven."
+    },
+    "battle_object_full_layout": {
+      "status": "partial",
+      "note": "pools/count/array/stride/id are proven from 0x3ac560; entry+0x20 is used as the accessor only when it maps and the module table reads back; owner/category/entry_id are not decoded. Raw 0x60 bytes are published."
+    },
+    "match_timer_stage_geometry": {
+      "status": "unknown",
+      "note": "rule kind/stock/item/stage id are decoded; the match timer, platform list and RNG-driven frame count are not. The camera bounds/range/pos/target are published as the stage geometry proxy."
+    },
+    "game_frame_counter": {
+      "status": "unknown",
+      "note": "the core block's game_frame is the reader's own frame count; no guest-side monotonic frame counter has been identified yet."
+    }
+  },
+
+  "live_validation": {
+    "status": "pending-final-run",
+    "method": "tools/mem/game_session.py run --owner F --no-launch --no-reader -- python3 tools/mem/extra_state.py --no-shm --print, plus tools/mem/test_extra.py SSBU_EXTRA_LIVE=1",
+    "note": "see FINDINGS_EXTRA.md for the observed values and the verified/unknown split"
+  }
+}

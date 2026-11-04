@@ -1,0 +1,498 @@
+{
+  "version": 7,
+  "updated": "2026-11-02T00:10:00-07:00",
+  "game": {
+    "name": "Super Smash Bros. Ultimate (ssbu-recomp, Linux)",
+    "build": "13.0.4",
+    "host_binary": "build-linux/work/ssbu_native",
+    "guest_elf": "build-linux/binaries/13.0.4/main.elf",
+    "guest_elf_symbols": 4918
+  },
+
+  "bases": {
+    "note": "No absolute address is hardcoded anywhere.",
+    "guest_image_base": {
+      "source": "/proc/<pid>/maps: the anonymous, read-only, offset-0 region (the recompiled image)",
+      "observed": "0x7100000000",
+      "validated": true
+    },
+    "host_module_base": {
+      "source": "/proc/<pid>/maps: first mapping of ssbu_native",
+      "note": "not used for game state; host symbols are unrelated to fighter state"
+    },
+    "symbol_offsets": {
+      "source": "main.elf .dynsym parsed by tools/mem/elfsym.py",
+      "validated": true
+    }
+  },
+
+  "candidates": [
+    {
+      "symbol": "_ZN3lib9SingletonIN3app14FighterManagerEE9instance_E",
+      "offset": "0x52b84f8",
+      "role": "FighterManager singleton instance_",
+      "verified": true,
+      "note": "LIVE-CONFIRMED. *(instance_) -> mgr, *(mgr) -> impl, impl+0xd2 = is_ready_go."
+    },
+    {
+      "symbol": "_ZN3lib9SingletonIN3app11BossManagerEE9instance_E",
+      "offset": "0x52b7ef8",
+      "role": "anchor for the camera singleton",
+      "verified": true,
+      "note": "The camera manager singleton is the anonymous pointer at BossManager::instance_ + 8 (0x52b7f00). app::camera::get_dead_area reads it with adrp 0x52b7000 / ldr [x8,#0xf00]; no CameraManager dynsym exists."
+    },
+    {
+      "symbol": "_ZN3lib9SingletonIN3app12StageManagerEE9instance_E",
+      "offset": "0x53299d8",
+      "role": "StageManager singleton (stage id)",
+      "verified": true,
+      "note": "app::sv_information::stage_id (0x227ebb0) reads adrp 0x5329000 / ldr [x8,#0x9d8] = this global, then ldr x8,[x8], then ldr w9,[x8,#0x17c]; 0xffffffff means no stage."
+    },
+    {
+      "symbol": "_ZN3lib9SingletonIN3app21FighterParamAccessor2EE9instance_E",
+      "offset": "0x52bb3b0",
+      "role": "fighter parameter accessor",
+      "verified": false,
+      "note": "not needed once FighterManager resolved"
+    },
+    {
+      "symbol": "_ZN3lib9SingletonIN3app19FighterCutInManagerEE9instance_E",
+      "offset": "0x52b8850",
+      "role": "final smash cut-in manager",
+      "verified": false,
+      "note": "UI only, no fighter state"
+    },
+    {
+      "symbol": "_ZN3lib9SingletonIN3app27FighterBayonettaFinalModuleEE9instance_E",
+      "offset": "0x52bb3b8",
+      "role": "Bayonetta final smash module",
+      "verified": false,
+      "note": "character specific, rejected"
+    },
+    {
+      "symbol": "_ZN3lib9SingletonIN3app22FighterPitBFinalModuleEE9instance_E",
+      "offset": "0x52c0f98",
+      "role": "Pit final smash module",
+      "verified": false,
+      "note": "character specific, rejected"
+    }
+  ],
+
+  "chain": {
+    "note": "Every offset below was read out of the game's own lua_bind accessor with aarch64-linux-gnu-objdump, not guessed.",
+    "steps": [
+      {"level": 0, "op": "guest_base + dynsym(FighterManager::instance_)", "result": "instance_", "verified": true},
+      {"level": 1, "op": "u64(instance_)", "result": "mgr", "verified": true},
+      {"level": 2, "op": "u64(mgr)", "result": "impl (FighterManager)", "verified": true},
+      {"level": 3, "op": "u64(impl + 0x20 + 8*entry_id)", "result": "FighterEntry", "verified": true},
+      {"level": 4, "op": "u64(entry + 0x4160)", "result": "fighter object", "verified": true},
+      {"level": 5, "op": "u64(obj + 0x20)", "result": "BattleObjectModuleAccessor", "verified": true},
+      {"level": 4, "op": "entry + 0xF0", "result": "FighterInformation object (embedded, vtable at +0)", "verified": true},
+      {"level": 5, "op": "u64(entry + 0xF8) = *(info + 8)", "result": "information record (kind, cpu, stock, rebirth)", "verified": true}
+    ],
+    "max_depth_used": 6,
+    "module_table": {
+      "accessor + 0x38": "PostureModule",
+      "accessor + 0x40": "StatusModule",
+      "accessor + 0x48": "ControlModule",
+      "accessor + 0x50": "WorkModule",
+      "accessor + 0x58": "GroundModule",
+      "accessor + 0x68": "KineticModule",
+      "accessor + 0x88": "MotionModule",
+      "accessor + 0xA8": "DamageModule",
+      "accessor + 0x128": "CancelModule"
+    },
+    "control_module": {
+      "module + 0x110": "u64 -> input struct (live: module+0x20; the getters dereference this)",
+      "input + 0x10": "f32 left stick x",
+      "input + 0x14": "f32 left stick y",
+      "input + 0x40": "f32 sub/C-stick x",
+      "input + 0x44": "f32 sub/C-stick y",
+      "input + 0x7C": "u32 raw button bitmask",
+      "input + 0x80": "u32 previous-frame button bitmask",
+      "input + 0x88": "u32 analog trigger",
+      "module + 0x120": "u32 direction flag; nonzero negates stick_x and sub_stick_x",
+      "note": "The offsets above are the resolved values on this build. gamestate.py reads the vtable, follows each virtual getter and decodes the tiny loader at run time, so a changed build resolves itself."
+    },
+    "work_module": {
+      "work + 0x18": "u64 -> 16 work-kind objects",
+      "kind[0] + 0x10": "float array base (get_float dispatch)",
+      "kind[0] + 0x20": "int32 array base (get_int dispatch)",
+      "work + 0x28": "u8[256] transition-term table",
+      "note": "get_int/set_int dispatch through the work vtable +0x98; get_float through +0x58. Instance ints are kind 0."
+    },
+    "camera_chain": {
+      "note": "app::camera::get_dead_area and sv_camera_manager::dead_range read this exact chain.",
+      "steps": [
+        "g = guest_base + dynsym(BossManager::instance_) + 8",
+        "a = u64(g)",
+        "manager = u64(a)",
+        "left, right, top, bottom = f32x4 at manager + 0xC30"
+      ],
+      "observed": [
+        "(-240.0, 240.0, 180.0, -140.0) on one stage",
+        "(-280.0, 280.0, 180.0, -140.0) on another",
+        "(-250.0, 170.0, 185.0, -65.0) on a third"
+      ],
+      "validated": true
+    }
+  },
+
+  "evidence": {
+    "note": "disassembly that proves each struct offset",
+    "PostureModule__pos_x_impl": {
+      "symbol_offset": "0x206ae10",
+      "asm": "ldr x0,[x0,#56]; ldr x8,[x0]; ldr x8,[x8,#96]; blr x8; ldr s0,[x0]",
+      "conclusion": "posture = *(accessor+0x38); vtable[12] returns &posture[0x30]"
+    },
+    "posture_vtable_12_target": {
+      "guest_offset": "0x4bc860",
+      "asm": "add x0, x0, #0x30 ; ret",
+      "conclusion": "position vector starts at PostureModule+0x30 (x,y,z float32)"
+    },
+    "PostureModule__lr_impl": {
+      "symbol_offset": "0x206af10",
+      "getter": "0x4bca10: ldr s0,[x0,#172]; ret",
+      "conclusion": "facing = float32 at PostureModule+0xAC"
+    },
+    "StatusModule__status_kind_impl": {
+      "symbol_offset": "0x2087720",
+      "getter": "0x4de560: ldr w0,[x0,#152]; ret",
+      "conclusion": "action_state = u32 at StatusModule+0x98"
+    },
+    "StatusModule__situation_kind_impl": {
+      "symbol_offset": "0x20877a0",
+      "getter": "0x4de750: ldr w0,[x0,#220]; ret",
+      "conclusion": "situation_kind = u32 at StatusModule+0xDC; 0 = on ground"
+    },
+    "MotionModule__frame_impl": {
+      "symbol_offset": "0x205cc70",
+      "getter": "0x49bf50: ldr s0,[x0,#112]; ret",
+      "conclusion": "action_frame = float32 at MotionModule+0x70"
+    },
+    "DamageModule__damage_impl": {
+      "symbol_offset": "0x200b700",
+      "asm": "ldr x0,[x0,#168]; ldr x8,[x0]; ldr x2,[x8,#200]; br x2",
+      "getter": "0x3ff9f0: ldr x8,[x0,#24]; ldr s0,[x8, x1*0x1c0]; ret",
+      "conclusion": "damage = float32 at *(DamageModule+0x18) + 0x1C0*index"
+    },
+    "WorkModule__get_int_impl": {
+      "symbol_offset": "0x208dbc0",
+      "getter": "0x4e4600",
+      "conclusion": "work int array = *(*(*(WorkModule+0x18)) + 0x20), stride 8, index = id & 0xffffff"
+    },
+    "WorkModule__is_enable_transition_term_impl": {
+      "symbol_offset": "0x208d9c0",
+      "asm": "ldr x9,[x0,#40]; and w8,w1,#0xffffff; ldrb w10,[x9,x8]; ...",
+      "conclusion": "terms = *(WorkModule+0x28); enabled = 0 if (b&0x38) else ((b>>2)&1) if (b&2) else (b&1)"
+    },
+    "FighterInformation__kind_impl": {
+      "symbol_offset": "0x20889e0",
+      "conclusion": "kind = u8 at record+0x30, minus 1. Live: P0 record+0x30=1 -> Mario kind 0; P1=2 -> DK kind 1."
+    },
+    "FighterInformation__stock_impl": {
+      "conclusion": "stock = u8 at record+0xD8. In the debug rule (0 stocks) it reads 0; a nonzero-stock rule is not yet exercised."
+    },
+    "ControlModule__get_button_impl": {
+      "symbol_offset": "0x20013e0",
+      "asm": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x1,[x8,#568]; br x1",
+      "conclusion": "ControlModule = *(accessor+0x48); get_button is vtable+0x238 (568)"
+    },
+    "ControlModule__get_stick_x_impl": {
+      "symbol_offset": "0x2001260",
+      "asm": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x1,[x8,#376]; br x1",
+      "conclusion": "get_stick_x is vtable+0x178 (376)"
+    },
+    "ControlModule__get_stick_y_impl": {
+      "symbol_offset": "0x2001280",
+      "asm": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x1,[x8,#392]; br x1",
+      "conclusion": "get_stick_y is vtable+0x188 (392)"
+    },
+    "ControlModule__get_sub_stick_x_impl": {
+      "symbol_offset": "0x2001370",
+      "asm": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x1,[x8,#512]; br x1",
+      "conclusion": "C-stick x is vtable+0x200 (512); the game calls the sub stick the C stick"
+    },
+    "ControlModule__get_sub_stick_y_impl": {
+      "symbol_offset": "0x2001390",
+      "asm": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x1,[x8,#528]; br x1",
+      "conclusion": "C-stick y is vtable+0x210 (528)"
+    },
+    "ControlModule__get_trigger_impl": {
+      "symbol_offset": "0x20013b0",
+      "asm": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x1,[x8,#544]; br x1",
+      "conclusion": "get_trigger is vtable+0x220 (544)"
+    },
+    "concrete_control_getters": {
+      "note": "Resolved live from the module vtable (0x7104f84de0 on the 13.0.4 build); guest offsets are target - guest_base.",
+      "get_button": "0x3f8640: ldr x8,[x0,#0x110]; ldr w0,[x8,#0x7c]; ret",
+      "get_button_prev": "0x3f8650: ldr x8,[x0,#0x110]; ldr w0,[x8,#0x80]; ret",
+      "get_stick_x": "0x3f84a0: ldr x9,[x0,#0x110]; ldr s0,[x9,#0x10]; ldr w8,[x0,#0x120]; cmp w8,#0; fneg s1,s0; fcsel s0,s0,s1,eq; ret",
+      "get_stick_y": "0x3f84d0: ldr x8,[x0,#0x110]; ldr s0,[x8,#0x14]; ret",
+      "get_sub_stick_x": "0x3f85c0: ldr x9,[x0,#0x110]; ldr s0,[x9,#0x40]; ldr w8,[x0,#0x120]; cmp w8,#0; fneg s1,s0; fcsel s0,s0,s1,eq; ret",
+      "get_sub_stick_y": "0x3f85f0: ldr x8,[x0,#0x110]; ldr s0,[x8,#0x44]; ret",
+      "get_trigger": "0x3f8610: ldr x8,[x0,#0x110]; ldr w0,[x8,#0x88]; ret",
+      "conclusion": "gamestate.py follows the vtable, reads the loader bytes, decodes the two LDRs and uses the offsets; the constants above are only the fallback."
+    },
+    "ControlModule__check_button_trigger_impl": {
+      "symbol_offset": "0x2001410",
+      "wrapper": "ldr x0,[x0,#72]; ldr x8,[x0]; ldr x2,[x8,#592]; br x2  -> vtable+0x250",
+      "concrete": "0x3f8670: blr [vtable+0x220] (get_trigger); adrp x8,0x4538000; add x8,x8,#0xfec; ldr w8,[x8,w19,sxtw #2]; tst w8,w0; cset w0,ne",
+      "table": "guest 0x4538fec, u32[18]: A=0x1 B=0x2 X=0x4 Y=0x8 L=0x20 R=0x400 ZL=0x1000 ZR=0x2000 PLUS=0x4000 MINUS=0x10 DPAD_L=0x40 DPAD_R=0x80 (ids 0..11; ids 12..17 = 0x8000,0x100,0x200,0x800,0x10000,0x20000)",
+      "conclusion": "The game's own button-id -> mask table proves the 12 canonical bits used by schema.BUTTON_BITS."
+    },
+    "StageManager__stage_id": {
+      "symbol_offset": "0x227ebb0 (_ZN3app14sv_information8stage_idEv); StageManager::instance_ = 0x53299d8",
+      "asm": "adrp x8,0x5329000; ldr x8,[x8,#0x9d8]; cbz x8,ret -1; ldr x8,[x8]; ldr w9,[x8,#0x17c]; cmn w9,#1; ...",
+      "conclusion": "stage_id = u32 at *(*(StageManager::instance_)) + 0x17C; 0xffffffff = no stage. Live: 0 during a fight (this is the select-screen information copy).",
+      "fallback": "match block guest offset 0x52c41b0 (runtime/debug_mode.c GA(0x71052c41b0)), stage id at +0x420; the debug hook prints this same value at match start. Live: 0x125 = 293 on Final Destination."
+    },
+    "FighterInformation__is_on_rebirth_impl": {
+      "symbol_offset": "0x20c9f10",
+      "asm": "ldr x8,[x0,#8]; ldrb w0,[x8,#908]; ret",
+      "conclusion": "is_on_rebirth = u8 at record+0x38C (908)"
+    },
+    "FighterInformation__stock_count_impl": {
+      "symbol_offset": "0x20c9e80",
+      "asm": "ldr x8,[x0,#8]; ldr w0,[x8,#216]; ret",
+      "conclusion": "stock = u32 at record+0xD8 (216), not u8; stored as int32 in the shared block"
+    },
+    "FighterInformation__is_operation_cpu_impl": {
+      "symbol_offset": "0x20c9e30",
+      "asm": "ldr x8,[x0,#8]; ldrb w0,[x8,#146]; ret",
+      "conclusion": "is_cpu = u8 at record+0x92 (146)"
+    },
+    "camera__get_dead_area": {
+      "symbol_offset": "0x2282ad0 (sv_camera_manager::dead_range) / 0x4bc... (app::camera)",
+      "asm": "adrp x8,0x52b7000; ldr x8,[x8,#0xf00]; ldr x8,[x8]; ldr s0,[x8,#0xc30]; ...",
+      "conclusion": "two derefs then float32x4 at manager+0xC30 = (left, right, top, bottom)"
+    },
+    "KineticModule__get_sum_speed_x_impl": {
+      "symbol_offset": "0x2043a00",
+      "asm": "ldr x0,[x0,#104]; ldr x8,[x0]; ldr x2,[x8,#200]; br x2",
+      "getter": "0x47a890: ldr x0,[x0,#104]; ldr x8,[x0]; ldr x8,[x8,#192]; blr x8",
+      "conclusion": "KineticModule = *(accessor+0x68); vtable[24] returns vx, vtable[25] returns vy (requires calling guest code; reader derives velocity from position instead)"
+    }
+  },
+
+  "fields": {
+    "is_ready_go": {
+      "address": "impl + 0xd2", "type": "u8", "verified": true,
+      "note": "1 while a fight is running"
+    },
+    "entry_id": {
+      "address": "loop index", "type": "int32", "verified": true,
+      "note": "player slot 0..1; entries 0 and 1 are the two players"
+    },
+    "kind": {
+      "address": "u8(u64(entry + 0xf8) + 0x30) - 1", "type": "int32", "verified": true,
+      "note": "Live: P0 = 0 (Mario), P1 = 1 (Donkey Kong). The record is static but the kind never changes during a match."
+    },
+    "stock": {
+      "address": "u32(u64(entry + 0xf8) + 0xd8)", "type": "int32", "verified": true,
+      "note": "The game's own FighterInformation__stock_count accessor loads a 32-bit word. The debug rule on this save is 0 stocks, so the live value is 0; the offset/width are proven by the accessor."
+    },
+    "is_cpu": {
+      "address": "u8(u64(entry + 0xf8) + 0x92)", "type": "int32", "verified": true,
+      "note": "0 = human, 1 = CPU. Published in the fighter slot now (v7); it is no longer used to reorder the slots."
+    },
+    "is_on_rebirth": {
+      "address": "u8(u64(entry + 0xf8) + 0x38c)", "type": "int32", "verified": true,
+      "note": "The game's FighterInformation__is_on_rebirth accessor (0x20c9f10: ldrb [x8,#908]). 1 while the fighter waits on the revival platform."
+    },
+    "is_enable_cancel": {
+      "address": "u8(u64(accessor + 0x128) + 0x1c)", "type": "int32", "verified": true,
+      "note": "CancelModule::is_enable_cancel. Nonzero while the current action can be cancelled."
+    },
+    "shield": {
+      "address": "derived from action_state in a GUARD status", "type": "int32", "verified": true,
+      "note": "v1: 1 while the status kind is the held-guard kind. Live 60 Hz CPU match: shield 0->1 at status 10 and back to 0 at 11/12/34 (29 and 27 transitions); status kind 10 is the exact guard kind. shield_size has no verified source yet and is published as 0.0."
+    },
+    "shield_size": {
+      "address": "no verified source yet", "type": "float32", "verified": false,
+      "note": "Always 0.0 in v7 (CONTRACTS: 'shield_size 0 until known')."
+    },
+    "hitstun": {
+      "address": "derived from action_state (DAMAGE/DAMAGE_FLY/TUMBLE/DOWN_FALL kinds)", "type": "int32", "verified": true,
+      "note": "1 while the fighter is in a damage reaction (54..62, 476..479, 505..511), else 0. Derived from the same status kind the game's StatusModule exposes."
+    },
+    "buttons": {
+      "address": "u32(*(u64(u64(accessor + 0x48) + 0x110) + 0x7c))", "type": "uint32", "verified": true,
+      "note": "Raw ControlModule button bitmask, resolved through the get_button virtual getter at vtable+0x238. Decoded into schema.BUTTON_ORDER (A B X Y L R ZL ZR PLUS MINUS DPAD_L DPAD_R)."
+    },
+    "stick_x": {
+      "address": "f32(input + 0x10), negated when module+0x120 != 0", "type": "float32", "verified": true,
+      "note": "get_stick_x at vtable+0x178; the concrete loader also reads module+0x120 and applies fneg+fcsel. Clamped to [-1,1]."
+    },
+    "stick_y": {
+      "address": "f32(input + 0x14)", "type": "float32", "verified": true,
+      "note": "get_stick_y at vtable+0x188; no sign flip."
+    },
+    "cstick_x": {
+      "address": "f32(input + 0x40), negated when module+0x120 != 0", "type": "float32", "verified": true,
+      "note": "get_sub_stick_x at vtable+0x200 (the game calls the C stick the sub stick). Same sign flip as stick_x."
+    },
+    "cstick_y": {
+      "address": "f32(input + 0x44)", "type": "float32", "verified": true,
+      "note": "get_sub_stick_y at vtable+0x210."
+    },
+    "trigger": {
+      "address": "u32(input + 0x88) via get_trigger (vtable+0x220)", "type": "float32", "verified": true,
+      "note": "The getter loads a word; gamestate accepts either a 0..0xffff fixed-point value or a float bit pattern and publishes [0,1]."
+    },
+    "stage_id": {
+      "address": "u32(*(*(guest_base + dynsym(StageManager::instance_))) + 0x17c); fallback: u32(guest_base + 0x52c41b0 + 0x420)", "type": "int32", "verified": true,
+      "note": "Header field. app::sv_information::stage_id reads the StageManager chain; 0xffffffff = no stage. That field is 0 in-match on this build, so the match block's in-match stage id (the value the debug hook prints) is used as the fallback. Live with stage=end: 0x3 = Final Destination; source is recorded in GameState.last_stage_source."
+    },
+    "game_frame": {
+      "address": "reader sample counter", "type": "uint32", "verified": false,
+      "note": "Monotonic reader frame index (not yet the game's internal frame counter). Header field."
+    },
+    "flags": {
+      "address": "header flag word", "type": "uint32", "verified": true,
+      "note": "bit 0 = stage_id was read this frame; bit 1 = the ControlModule virtual getters were resolved."
+    },
+    "x": {
+      "address": "u64(accessor + 0x38) + 0x30", "type": "float32", "verified": true,
+      "note": "PostureModule position vector, component 0"
+    },
+    "y": {
+      "address": "u64(accessor + 0x38) + 0x34", "type": "float32", "verified": true,
+      "note": "component 1; 0.01 on the floor, >0 jumping, <0 falling off the stage"
+    },
+    "damage": {
+      "address": "u64(u64(accessor + 0xa8) + 0x18) + 0x1c0*index", "type": "float32", "verified": true,
+      "note": "index 0. Verified against the HUD: memory 36.347 = screen 36.3%"
+    },
+    "facing": {
+      "address": "u64(accessor + 0x38) + 0xac", "type": "float32", "verified": true,
+      "note": "+1 / -1; flips exactly when the character turns around"
+    },
+    "action_state": {
+      "address": "u64(accessor + 0x40) + 0x98", "type": "u32", "verified": true,
+      "note": "status kind: 0 wait, 1 walk, 6 dash, 11 jump squat, 12 jump, 18 fall, 54 damage, 73 cliff catch, 263 KO, 476 tumble"
+    },
+    "action_frame": {
+      "address": "u64(accessor + 0x88) + 0x70", "type": "float32", "verified": true,
+      "note": "increments within an action and resets when the status changes"
+    },
+    "on_ground": {
+      "address": "u64(accessor + 0x40) + 0xdc", "type": "u32", "verified": true,
+      "note": "situation_kind == 0. Observed 0 on the floor, 2 on the revival platform, 5 while falling to a KO"
+    },
+    "is_actionable": {
+      "address": "derived: count of enabled bytes in u64(WorkModule + 0x28)[0..255] >= 4",
+      "type": "int32", "verified": true,
+      "note": "Uses the game's own transition-term table (the same bytes is_enable_transition_term reads). Live counts: WAIT ~49, dash ~44, jump ~32, cliff ~12, hitstun 2, tumble/KO 0. A fallback action-state table is kept only for the rare frame where the term table is unreadable."
+    },
+    "jumps_left": {
+      "address": "max(0, int[6] - int[4]) at *(*(*(WorkModule+0x18)) + 0x20)",
+      "type": "int32", "verified": true,
+      "note": "index 6 = jump_count_max, index 4 = jump_count. Live: Mario 2 on the ground, 1 after one jump / on a cliff; DK 1. This replaced the old guess that no work int behaved like a jump counter."
+    },
+    "vx": {
+      "address": "derived: (x - previous_x) / dt", "type": "float32", "verified": true,
+      "note": "The engine getter (KineticModule vtable[24]) needs a guest call; the position delta is an exact enough estimate at 60 Hz and is what the reader publishes."
+    },
+    "vy": {
+      "address": "derived: (y - previous_y) / dt", "type": "float32", "verified": true,
+      "note": "Same as vx."
+    },
+    "dist_to_blast": {
+      "address": "derived: min(x-left, right-x, y-bottom, top-y) with the live camera bounds",
+      "type": "float32", "verified": true,
+      "note": "Bounds come from the camera manager, not a table. Live: (-240,240,180,-140), (-280,280,180,-140), (-250,170,185,-65). Clamped to >= 0."
+    },
+    "dx": {
+      "address": "derived: opponent_x - self_x", "type": "float32", "verified": true,
+      "note": "SELF sees the opponent's offset; the OPPONENT row is the negation."
+    },
+    "dy": {
+      "address": "derived: opponent_y - self_y", "type": "float32", "verified": true,
+      "note": "Same convention as dx."
+    },
+    "facing_rel": {
+      "address": "derived: sign(dx) == sign(facing) ? +1 : -1", "type": "int32", "verified": true,
+      "note": "+1 = opponent is in front, -1 = behind, 0 = unknown/degenerate. Computed per row from that row's own facing."
+    },
+    "match_state": {
+      "address": "derived from ready_go + fighter-entry allocation in gamestate.py", "type": "u32", "verified": true,
+      "note": "0=MENU (entry 0/1 freed and no recent fight), 1=IN_MATCH (ready_go=1), 2=RESULTS (entries still allocated, or within 8 s of ready_go dropping). The old 'was in a fight' test wrongly reported RESULTS forever at the main menu."
+    }
+  },
+
+  "unverified": {
+    "stock_nonzero": {
+      "attempts": 3,
+      "tried": ["record+0xd8 during a 0-stock debug rule", "read as u32 now (the game's accessor loads w0)"],
+      "status": "partially_verified",
+      "note": "The address/width are proven by FighterInformation__stock_count (ldr w0,[x8,#216]). The value is 0 because the debug match runs the saved 0-stock rule. Run a stock match to confirm the unit."
+    },
+    "status_kind_names": {
+      "attempts": 3,
+      "tried": [
+        "searched main.elf for inline pointers to the 485 FIGHTER_STATUS_KIND_* strings: none",
+        "searched .rela.dyn and .rela.plt for addends equal to those string vaddrs: none (they are referenced only by PC-relative code)"
+      ],
+      "status": "approximate",
+      "note": "ACTION_STATE_NAMES in schema.py is the common Smash status-kind enum. The values used by the verifier (0,1,6,11,12,18,54,73,263,476) are confirmed live; character-specific specials may be off by a few names."
+    }
+  },
+
+  "verification": {
+    "method": "screenshot of the game window (xwd) compared against a probe run in the same second; widget text read headlessly from the Tk verifier",
+    "damage_check": {
+      "memory": 36.347,
+      "hud": "36.3%",
+      "result": "match"
+    },
+    "position_check": {
+      "observations": [
+        "y = 0.01 while standing",
+        "y rose to 31.65 / 26.41 during jumps",
+        "y = 136.8 on the revival platform",
+        "y = -145 while falling to a KO",
+        "x moved -70 -> -74 -> -28 while walking"
+      ],
+      "result": "consistent"
+    },
+    "jumps_check": {
+      "observations": ["Mario 2 on the ground", "Mario 1 after one jump / while on a cliff", "DK 1"],
+      "result": "consistent"
+    },
+    "actionable_check": {
+      "term_counts": {"WAIT": 49, "DASH": 44, "CLIFF_CATCH": 12, "hitstun": 2, "TUMBLE": 0},
+      "threshold": 4,
+      "result": "matches the game's own transition-term accessor"
+    },
+    "blast_check": {
+      "method": "two derefs from BossManager::instance_ + 8, f32x4 at manager+0xC30",
+      "observed": ["(-240,240,180,-140)", "(-280,280,180,-140)", "(-250,170,185,-65)"],
+      "result": "tracks the stage camera"
+    },
+    "input_check": {
+      "method": "click the HUD, then click the game (a real FocusOut/FocusIn), then xdotool key z",
+      "result": "the menu advanced and a match started. xdotool windowfocus alone sets X input focus but leaves SDL_GetKeyboardFocus() NULL, so GetForegroundWindow() returns NULL and nnhid.c ignores GetAsyncKeyState. live.sh performs the click round-trip."
+    },
+    "sustained_fps": {
+      "measured": 60.0,
+      "seconds": 10,
+      "frames": 600,
+      "requirement": ">= 55",
+      "result": "pass"
+    }
+  },
+
+  "notes": [
+    "The FighterInformation object is embedded at entry+0xF0; the game's accessors take that address and start with ldr x8,[x0,#8]. u64(entry+0xF8) is therefore the information record, not a separate object.",
+    "Guest image maps at 0x71_00000000 (10 hex digits); heap allocations are at 0x7100_xxxxxxxx (12 digits). A naive range check confuses the two.",
+    "run.py strips SSBU_* environment variables; pass them with --env, and input sequences with --seq.",
+    "SSBU_DEBUG_MATCH applies the saved rules. With the saved 0-stock rule a KO ends the match and the game immediately restarts it (the debug hook re-applies the setup), so matches cycle every ~10-15 s. stock= is only applied when the panel state's rule kind is already 1, which it is not on this save.",
+    "vx/vy are derived from position deltas, not read from the engine (the KineticModule getter would need a guest call).",
+    "is_actionable uses the game's own transition-term table; the old ACTIONABLE_TABLE is only a fallback for an unreadable term table.",
+    "The keyboard only reaches the game while the SDL window has the X11 input focus. xdotool windowactivate (EWMH) silently fails under mutter; xdotool windowfocus works. tools/mem/live.sh installs a focus keeper for this.",
+    "A torn-down fighter entry can hold a non-null object pointer with status 0x7fffffff; gamestate.py rejects rows with an out-of-range status or non-finite coordinates so the verifier does not flash red during a results transition.",
+    "v7 slots are fixed in player order (slot 0 = entry 0/P1, slot 1 = entry 1/P2). The old human-first reorder is gone; use is_cpu to tell them apart.",
+    "The ControlModule getters are virtual. gamestate.py resolves the concrete function from the live vtable, decodes its ldr/ldrb instructions and uses those offsets; the documented constants are the fallback when a module is being torn down."
+  ]
+}
