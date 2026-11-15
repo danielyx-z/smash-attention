@@ -97,6 +97,22 @@ if ! pgrep -x ssbu_native >/dev/null 2>&1; then
     exit 1
 fi
 
+# -- expert recorder (optional, on from the start) --------------------------
+# SSBU_LIVE_RECORD=<dir>: start gym_record with the game, so every fight is
+# collected from its first frame (the recorder polls the state block and starts
+# an episode on fight_on 0->1; it must be up before the match, which is why it
+# belongs here and not in a later step).
+if [[ -n "${SSBU_LIVE_RECORD:-}" ]]; then
+    echo "starting recorder (log: ~/ssbu_record.log) -> $SSBU_LIVE_RECORD"
+    setsid nohup "$PY" -m rl.record.gym_record \
+        --episodes "${SSBU_LIVE_RECORD_EPISODES:-200}" \
+        --out "$SSBU_LIVE_RECORD" \
+        --episode-frames "${SSBU_LIVE_EPISODE_FRAMES:-5400}" \
+        --cpu-level "${SSBU_LIVE_RECORD_CPU:-9}" --stage "${SSBU_LIVE_RECORD_STAGE:-end}" \
+        --no-lock > "$HOME/ssbu_record.log" 2>&1 < /dev/null &
+    disown
+fi
+
 # -- reader + verifier ------------------------------------------------------
 echo "starting reader (log: ~/ssbu_reader.log)"
 setsid nohup "$PY" -m rl.memory.reader \
