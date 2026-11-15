@@ -9,3 +9,8 @@ dist/
 
 # local live-run logs / scratch
 *.log
+
+# generated data: recordings, checkpoints, acceptance artifacts (regenerable,
+# ~2 MB per minute of play; the files stay on disk)
+/data/
+/test_artifacts/
