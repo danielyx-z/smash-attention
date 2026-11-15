@@ -93,8 +93,11 @@ def main() -> int:
     r.add_argument("--no-reader", action="store_true", help="do not start the reader")
     r.add_argument("--restart-reader", action="store_true", help="stop and restart the reader")
     r.add_argument("--restart-game", action="store_true", help="stop and restart the game")
-    r.add_argument("--keep-game", action="store_true", help="leave the game running on exit")
+    r.add_argument("--keep-game", action="store_true",
+                   help="leave the game and the reader it started running on exit")
     r.add_argument("--timeout", type=float, default=900.0)
+    r.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                   help="extra SSBU_* environment for the game (repeatable)")
     r.add_argument("command", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     if args.cmd != "run":
@@ -132,11 +135,14 @@ def main() -> int:
                 return 3
             print(f"[{args.owner}] starting game", file=log)
             play = os.path.join(REPO, "play.sh")
+            play_env = ["--env", "SSBU_SKIP_MOVIES=1",
+                        "--env", f"SSBU_KEYBOARD_PLAYER={os.environ.get('SSBU_KEYBOARD_PLAYER', '1')}",
+                        "--env", "SSBU_RL=1",
+                        "--env", f"SSBU_DEBUG_MATCH={args.match}"]
+            for kv in args.env:
+                play_env += ["--env", kv]
             started_game = subprocess.Popen(
-                [play, "--env", "SSBU_SKIP_MOVIES=1",
-                 "--env", "SSBU_KEYBOARD_PLAYER=0",
-                 "--env", "SSBU_RL=1",
-                 "--env", f"SSBU_DEBUG_MATCH={args.match}"],
+                [play] + play_env,
                 cwd=REPO, env=env, stdout=log, stderr=log,
                 start_new_session=True)
             if not wait_for(game_pid, 120.0):
@@ -155,7 +161,7 @@ def main() -> int:
         try:
             rc = subprocess.run(cmd, cwd=RLROOT, env=env, stdout=log, stderr=log).returncode
         finally:
-            if started_reader is not None:
+            if started_reader is not None and not args.keep_game:
                 stop(started_reader.pid, "reader")
             if started_game is not None and not args.keep_game:
                 p = game_pid()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command live setup for the external memory layer.
 #
-#   src/rl/scripts/live.sh            game + 60 fps reader + verifier + focus
+#   src/rl/scripts/live.sh            game + 60 fps reader + stage view + focus
 #   src/rl/scripts/live.sh --attach   keep the running game, restart the rest
 #   src/rl/scripts/live.sh --no-focus do not install the focus keeper
 #   src/rl/scripts/live.sh --match '...'  SSBU_DEBUG_MATCH string
@@ -61,7 +61,7 @@ if [[ $ATTACH -eq 0 ]]; then
     pkill -x ssbu_native 2>/dev/null
 fi
 stop_pat 'python3? .*rl\.memory\.reader'
-stop_pat 'python3? .*rl\.tests\.verify_gui'
+stop_pat 'python3? .*rl\.scripts\.live_view'
 [[ -f "$HOME/.ssbu_focus.pid" ]] && kill "$(cat "$HOME/.ssbu_focus.pid")" 2>/dev/null
 rm -f "$HOME/.ssbu_focus.pid"
 sleep 1
@@ -75,6 +75,7 @@ if [[ $ATTACH -eq 0 ]]; then
         ./play.sh \
         --env SSBU_SKIP_MOVIES=1 \
         --env "SSBU_KEYBOARD_PLAYER=$KB_PLAYER" \
+        --env SSBU_RL=1 \
         --env "SSBU_DEBUG_MATCH=$MATCH" \
         > "$HOME/smash.log" 2>&1 < /dev/null &
     disown
@@ -95,9 +96,9 @@ setsid nohup "$PY" -m rl.memory.reader \
     > "$HOME/ssbu_reader.log" 2>&1 < /dev/null &
 disown
 
-echo "starting verifier (log: ~/ssbu_verifier.log)"
-setsid nohup "$PY" -m rl.tests.verify_gui \
-    > "$HOME/ssbu_verifier.log" 2>&1 < /dev/null &
+echo "starting stage view (log: ~/ssbu_view.log)"
+setsid nohup "$PY" -m rl.scripts.live_view \
+    > "$HOME/ssbu_view.log" 2>&1 < /dev/null &
 disown
 
 # -- focus the game ---------------------------------------------------------
@@ -129,7 +130,7 @@ if [[ -n "$GAME_WIN" ]]; then
     # X input focus to a window that already has it generates no event, so the
     # game keeps ignoring keys.  Move focus to the HUD with a real click, then
     # back to the game with another click; that produces FocusOut/FocusIn.
-    HUD_WIN="$(xdotool search --name 'SSBU state verifier' 2>/dev/null | tail -1)"
+    HUD_WIN="$(xdotool search --name 'SSBU live view' 2>/dev/null | tail -1)"
     if [[ -n "$HUD_WIN" ]]; then
         xdotool mousemove --window "$HUD_WIN" 60 60 2>/dev/null
         xdotool click 1 2>/dev/null
@@ -155,7 +156,7 @@ if [[ $KEEP_FOCUS -eq 1 ]]; then
             if [ -n "$g" ]; then
                 f="$(xdotool getwindowfocus getwindowname 2>/dev/null)"
                 case "$f" in
-                    *"SSBU native"*|*"SSBU state verifier"*) ;;
+                    *"SSBU native"*|*"SSBU live view"*) ;;
                     *) xdotool windowfocus "$g" 2>/dev/null ;;
                 esac
             fi
@@ -171,6 +172,6 @@ echo
 echo "live.  controls: click the game window, then use the keyboard."
 echo "  default keys: J/L = left/right, I/K = up/down, Z = A (jump), X = B,"
 echo "                C = X, V = Y, Q/E = L/R, A/S = ZL/ZR, Enter = +"
-echo "  verifier: H = raw hex, P = pause, Q = quit (click it first)"
+echo "  stage view: P = pause, T = trails, H = raw hex, S = snapshot, Q = quit"
 echo "  a tutorial popup in the game is dismissed with Z (the A button)"
-echo "  logs: ~/smash.log  ~/ssbu_reader.log  ~/ssbu_verifier.log"
+echo "  logs: ~/smash.log  ~/ssbu_reader.log  ~/ssbu_view.log"

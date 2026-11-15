@@ -114,6 +114,15 @@ REC_CPU_FLAG = 0x92           # u8, 1 = CPU, 0 = human
 REC_STOCK = 0xD8              # u32, remaining stocks (contract: read u32, store i32)
 REC_ON_REBIRTH = 0x38C        # u8, 1 while on the revival platform
 
+#: 13.0.4 match block (the records the game spawns the fighters from).  The
+#: entry information record at entry+0xF8 keeps the select-screen copy, which
+#: can still name the saved roster when the debug hook forces a character by
+#: name (SSBU_DEBUG_MATCH); the match's own player record carries the kind that
+#: actually spawned, at +8.  Player record n is at ``MATCH_BLOCK + 0x260*n``.
+MATCH_BLOCK = 0x52C4730
+MATCH_RECORD_SIZE = 0x260
+MATCH_RECORD_KIND = 0x8       # u8, fighter kind (0 = Mario, 1 = Donkey Kong, ...)
+
 # ControlModule: the module holds a pointer to its input struct at +0x110.
 CTRL_INPUT_PTR = 0x110
 CTRL_BUTTONS = 0x7C           # u32 raw button bitmask
@@ -660,11 +669,20 @@ class GameState:
 
         # kind, stock, CPU and rebirth live in the information record
         # (u64(entry+0xF8); the game's accessors take entry+0xF0 = info and
-        # dereference info+8, which is this same pointer).
+        # dereference info+8, which is this same pointer).  The kind there is
+        # the select-screen copy; when SSBU_DEBUG_MATCH forces a character by
+        # name the match's own record has the spawned kind, so prefer it.
+        kind = m.u8(self.base + MATCH_BLOCK
+                    + MATCH_RECORD_SIZE * entry_id + MATCH_RECORD_KIND)
+        if kind is None or kind >= 0x80:
+            kind = None
+            if rec:
+                kv = m.u8(rec + REC_KIND_PLUS1)
+                if kv is not None and kv > 0:
+                    kind = kv - 1
+        if kind is not None:
+            put("kind", kind)
         if rec:
-            kv = m.u8(rec + REC_KIND_PLUS1)
-            if kv is not None and kv > 0:
-                put("kind", kv - 1)
             stock = m.u32(rec + REC_STOCK)
             if stock is not None:
                 if stock >= 0x80000000:      # store the u32 bit pattern as i32
