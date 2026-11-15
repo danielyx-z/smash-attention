@@ -1,18 +1,41 @@
 # SSBU live-state bridge (`tools/mem`)
 
-> **Repository note (2026-11-03).** This repository is the `ssbu-rl` package
-> (`src/rl/`). The recompiled game itself is the separate upstream project
+> **Layout (2026-11-15).** This repository is the `ssbu-rl` package
+> (`src/rl/`): state reader, gym env, input, recorder, behaviour cloning and
+> evaluation. The recompiled game is the separate
 > [OpenSmash-Ultimate/ssbu-recomp](https://github.com/OpenSmash-Ultimate/ssbu-recomp)
-> and is **not vendored here**. This toolkit needs one small runtime change in
-> that tree — the R2 direct-reset hook and debug-match forcing in
-> `runtime/debug_mode.c` — kept as
-> [`patches/ssbu-recomp-rl.patch`](patches/ssbu-recomp-rl.patch).
-> All credit for the recomp belongs to the upstream authors.
+> project; the runtime switches everything here depends on (`SSBU_RL`,
+> `SSBU_DEBUG_MATCH`, `SSBU_SPEED`, the pads) live in its
+> `runtime/debug_mode.c`, `runtime/nnhid.c` and `runtime/nntime.c` and are **not
+> vendored here**. `patches/ssbu-recomp-rl.patch` is a snapshot of the first
+> runtime change (2026-11-03), kept for reference.
+>
+> ```
+> src/rl/env/        state → gym observation/action, SSBUGymEnv
+> src/rl/input/      uinput pad, virtual pads block, control block v2, reset
+> src/rl/record/     CPU-vs-CPU expert recorder (60 Hz, one .npz per episode)
+> src/rl/bc/         behaviour cloning (GRU + action chunks) and evaluation
+> src/rl/scripts/    live.sh, live view, turbo check, p2_pad, waiter
+> src/rl/findings/   FINDINGS.md — evidence and decisions
+> src/rl/contracts/  CONTRACTS.md — shm layout, action/observation, dataset
+> ```
+>
+> Generated data is **not** tracked (`.gitignore`): `data/il/<run>/` holds
+> recordings, `data/models/` checkpoints.
+>
+> Current launch (game + reader + viewer + recorder, 1x, DK mirror):
+>
+> ```bash
+> SSBU_LIVE_RECORD=data/il/dk9 \
+> SSBU_LIVE_MATCH="$(.venv/bin/python -m rl.utils.match_config \
+>     --p1 donkey --p2 donkey --p1-type cpu --p2-type cpu --cpu 9 \
+>     --stage end --stock 255 --time 999 --items off)" \
+> src/rl/scripts/live.sh
+> ```
 >
 > The sections below predate the move out of `ssbu-recomp/tools/mem/` and still
-> use `tools/mem/...` paths; see [`MIGRATION.md`](MIGRATION.md) for the current
-> layout and commands.
-
+> use `tools/mem/...` paths; see [`MIGRATION.md`](MIGRATION.md).
+>
 ## Upstream runtime change
 
 The only runtime file this toolkit requires is `runtime/debug_mode.c`. Apply
