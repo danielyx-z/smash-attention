@@ -479,6 +479,7 @@ class CompareResult:
     divergence: Divergence | None
     warnings: tuple[str, ...]
     shift: int = 0
+    equal_hashes: int = 0
 
     @property
     def missing(self) -> int:
@@ -486,7 +487,8 @@ class CompareResult:
 
     @property
     def matched(self) -> int:
-        return self.common - (1 if self.divergence is not None else 0)
+        """Shared frames whose hashes are equal (not "common minus one")."""
+        return self.equal_hashes
 
     @property
     def allowed_missing(self) -> int:
@@ -609,15 +611,17 @@ def _compare_at_shift(map_a, map_b, shift: int):
     only_a = sorted(k for k in map_a if k + shift not in map_b)
     only_b = sorted(k for k in map_b if k - shift not in map_a)
     divergence = None
+    equal = 0
     for k in common:
         a_hash = map_a[k][1]
         b_hash = map_b[k + shift][1]
-        if a_hash != b_hash:
+        if a_hash == b_hash:
+            equal += 1
+        elif divergence is None:
             divergence = Divergence(
                 rel_frame=k, a_hash=a_hash, b_hash=b_hash,
                 a_frame=map_a[k][0], b_frame=map_b[k + shift][0])
-            break
-    return common, only_a, only_b, divergence
+    return common, only_a, only_b, divergence, equal
 
 
 def compare_runs(run_a: Run, run_b: Run, max_missing: int = 0,
@@ -641,16 +645,16 @@ def compare_runs(run_a: Run, run_b: Run, max_missing: int = 0,
     chosen = None
     fallback = None
     for shift in shifts:
-        common, only_a, only_b, div = _compare_at_shift(map_a, map_b, shift)
+        common, only_a, only_b, div, equal = _compare_at_shift(map_a, map_b, shift)
         missing = len(only_a) + len(only_b)
         if fallback is None or (div is None and fallback[4] is not None):
-            fallback = (shift, common, only_a, only_b, div, missing)
+            fallback = (shift, common, only_a, only_b, div, missing, equal)
         if div is None and missing <= max_missing + 2 * abs(shift):
-            chosen = (shift, common, only_a, only_b, div, missing)
+            chosen = (shift, common, only_a, only_b, div, missing, equal)
             break
     if chosen is None:
         chosen = fallback
-    shift, common, only_a, only_b, divergence, missing = chosen
+    shift, common, only_a, only_b, divergence, missing, equal = chosen
     common = len(common)
     only_a = len(only_a)
     only_b = len(only_b)
@@ -680,6 +684,7 @@ def compare_runs(run_a: Run, run_b: Run, max_missing: int = 0,
         divergence=divergence,
         warnings=tuple(warnings),
         shift=shift,
+        equal_hashes=equal,
     )
 
 
