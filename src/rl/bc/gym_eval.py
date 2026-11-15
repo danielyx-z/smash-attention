@@ -20,7 +20,7 @@ Environment interface assumed (documented in FINDINGS, Agent E):
 * Gymnasium reset/step: ``reset() -> (obs, info)`` (a bare ``obs`` is accepted),
   ``step(action) -> (obs, reward, terminated, truncated, info)`` (4-tuples are
   accepted);
-* ``obs`` is the 100-float CONTRACTS.md policy observation (or a dict with it
+* ``obs`` is the 56-per-fighter CONTRACTS.md policy observation (or a dict with it
   under ``obs``/``observation``/``state``);
 * actions are either the 16-float vector ``[buttons(12), stick(2), cstick(2)]``
   (what ``gym_action.decode_action`` accepts) or a dict with
@@ -58,7 +58,7 @@ LOSS_VALUES = {"p2", "player2", "player_2", "opponent", 1, "1"}
 class MockEnv:
     """A tiny deterministic-ish stand-in for closed-loop smoke tests.
 
-    It has the Gymnasium reset/step shape, a 100-float observation and a
+    It has the Gymnasium reset/step shape, the CONTRACTS.md observation and a
     17-float action space, but no game: pressing A raises the opponent's
     damage, the opponent occasionally damages us, and the episode ends after
     ``max_steps`` or when one side reaches 140%.

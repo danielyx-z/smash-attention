@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Policy observation profile v1 for the SSBU gym environment.
 
-Layout (CONTRACTS.md), flat ``Box(float32)``, P1 then P2, 50 values each
-(100 total).  For one fighter::
+Layout (CONTRACTS.md), flat ``Box(float32)``, P1 then P2, 56 values each
+(112 total).  For one fighter::
 
     x/100, y/100, vx/50, vy/50, damage/100, facing, on_ground, is_actionable,
     jumps_left/2, action_frame/60, shield, dist_to_blast/300, hitstun,
     is_on_rebirth, action_state one-hot(32), dx/100, dy/100, distance/200,
-    facing_rel
+    facing_rel, is_escape, is_tech, is_ledge, is_catch, is_landing,
+    is_shieldbreak
 
 ``action_state`` is a curated one-hot of 32 entries: 31 common fighter status
 kinds plus a final ``OTHER`` bucket for everything else.  The curated list is
@@ -115,8 +116,26 @@ RELATIVE_FIELDS: tuple[tuple[str, float], ...] = (
     ("facing_rel", 1.0),
 )
 
+#: Boolean families over the action status ids (``schema.ACTION_STATE_NAMES``),
+#: written after the relative block.  1.0 when the fighter's status belongs to
+#: the family, else 0.0.  The 32-entry one-hot has one bucket for everything
+#: else (OTHER); these keep the options a policy needs to see distinct:
+#: defensive rolls/dodges, techs, ledge options, grabs/throws, landing lag and
+#: a shield break.
+FAMILY_FLAGS: tuple[tuple[str, tuple[int, ...]], ...] = (
+    ("is_escape", (78, 79, 80)),                 # ESCAPE_F, ESCAPE_B, ESCAPE_AIR
+    ("is_tech", (71, 72)),                       # PASSIVE, PASSIVE_FB
+    ("is_ledge", (73, 74, 75, 76, 77)),          # CLIFF_CATCH/WAIT/CLIMB_*/ATTACK
+    ("is_catch", (43, 44, 45, 46, 47,              # THROW, THROW_F/B/HI/LW
+                  48, 49, 50, 51, 52, 53)),      # CATCH*, THROW_CATCH
+    ("is_landing", (84, 85, 86)),                # LANDING, LANDING_AIR, LANDING_FALL_SPECIAL
+    ("is_shieldbreak", (124, 125, 126, 127,      # SHIELD_BREAK_*
+                        128, 129, 130)),
+)
+FAMILY_FLAG_NAMES: tuple[str, ...] = tuple(name for name, _ids in FAMILY_FLAGS)
+
 PER_FIGHTER_SIZE = (len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE
-                    + len(RELATIVE_FIELDS))
+                    + len(RELATIVE_FIELDS) + len(FAMILY_FLAGS))
 N_FIGHTERS = 2
 OBS_SIZE = PER_FIGHTER_SIZE * N_FIGHTERS
 OBS_DTYPE = np.float32
@@ -132,6 +151,7 @@ def _fighter_feature_names(fighter_index: int) -> list[str]:
     names = [prefix + name for name, _scale in SCALAR_FIELDS]
     names += [prefix + "action_" + name for name in _ACTION_NAMES]
     names += [prefix + name for name, _scale in RELATIVE_FIELDS]
+    names += [prefix + name for name in FAMILY_FLAG_NAMES]
     return names
 
 
@@ -147,8 +167,10 @@ for _i in range(N_FIGHTERS):
     SLICES[f"p{_i + 1}_scalars"] = slice(_base, _base + len(SCALAR_FIELDS))
     SLICES[f"p{_i + 1}_action"] = slice(_base + len(SCALAR_FIELDS),
                                         _base + len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE)
-    SLICES[f"p{_i + 1}_relative"] = slice(
-        _base + len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE, _base + PER_FIGHTER_SIZE)
+    _rel = _base + len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE
+    SLICES[f"p{_i + 1}_relative"] = slice(_rel, _rel + len(RELATIVE_FIELDS))
+    SLICES[f"p{_i + 1}_family"] = slice(_rel + len(RELATIVE_FIELDS),
+                                        _base + PER_FIGHTER_SIZE)
 del _i, _base
 
 
@@ -214,6 +236,14 @@ def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray) -> None:
     for value, (name, scale) in zip(values, RELATIVE_FIELDS):
         del name
         out[pos] = value / scale if normalize else value
+        pos += 1
+
+    try:
+        state_int = int(fighter.get("action_state", -1))
+    except (TypeError, ValueError):
+        state_int = -1
+    for _name, ids in FAMILY_FLAGS:
+        out[pos] = 1.0 if state_int in ids else 0.0
         pos += 1
 
     np.clip(out, -OBS_LIMIT, OBS_LIMIT, out=out)
@@ -285,6 +315,7 @@ def observation_metadata() -> dict:
         "action_states": [{"name": n, "id": i} for n, i in CURATED_ACTION_STATES]
                          + [{"name": "OTHER", "id": None}],
         "relative": [{"name": n, "divisor": s} for n, s in RELATIVE_FIELDS],
+        "family_flags": [{"name": n, "states": list(ids)} for n, ids in FAMILY_FLAGS],
         "excluded": ["stock", "dead", "stage", "match_state", "opponent_id",
                      "controls", "projectiles"],
     }

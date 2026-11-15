@@ -189,13 +189,26 @@ the decoded vector.
 
 ## Policy observation profile v1
 
-Per fighter (P1 then P2), flat float32:
+Per fighter (P1 then P2), flat float32, **56 values per fighter (112 total)**:
 
 ```
 x/100, y/100, vx/50, vy/50, damage/100, facing, on_ground, is_actionable,
 jumps_left/2, action_frame/60, shield, dist_to_blast/300, hitstun,
 is_on_rebirth, action_state one-hot(32), dx/100, dy/100, distance/200,
-facing_rel
+facing_rel, is_escape, is_tech, is_ledge, is_catch, is_landing,
+is_shieldbreak
+```
+
+The six trailing flags are 0/1 families over the raw status id, so options the
+32-entry one-hot hides in OTHER stay distinct:
+
+```
+is_escape      78 ESCAPE_F, 79 ESCAPE_B, 80 ESCAPE_AIR        (roll, spot dodge, air dodge)
+is_tech        71 PASSIVE, 72 PASSIVE_FB                      (tech)
+is_ledge       73 CLIFF_CATCH, 74 CLIFF_WAIT, 75/76 CLIMB_*, 77 CLIFF_ATTACK
+is_catch       43 THROW, 44-47 THROW_*, 48-53 CATCH*/THROW_CATCH   (grab family)
+is_landing     84 LANDING, 85 LANDING_AIR, 86 LANDING_FALL_SPECIAL
+is_shieldbreak 124-130 SHIELD_BREAK_*
 ```
 
 No stock, dead count, stage id, match state, opponent id, control, projectiles.

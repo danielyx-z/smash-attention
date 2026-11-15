@@ -101,8 +101,6 @@ FIELDS = (
 )
 FIELD_INDEX = {name: i for i, name in enumerate(FIELDS)}
 
-OBS_PER_FIGHTER = 50
-OBS_DIM = 2 * OBS_PER_FIGHTER
 STICK_BINS = 9
 N_ACTIONS = STICK_BINS * STICK_BINS
 FRAME_SKIP = 5
@@ -126,6 +124,15 @@ _LOCAL_CURATED_STATES = (
     0, 1, 2, 4, 6, 9, 11, 12, 13, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28,
     29, 30, 35, 36, 37, 38, 43, 54, 55, 56, 63, 74,
 )
+# same families as gym_obs.FAMILY_FLAGS (status ids from schema.ACTION_STATE_NAMES)
+_LOCAL_FAMILIES = (
+    ("is_escape", (78, 79, 80)),
+    ("is_tech", (71, 72)),
+    ("is_ledge", (73, 74, 75, 76, 77)),
+    ("is_catch", (43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53)),
+    ("is_landing", (84, 85, 86)),
+    ("is_shieldbreak", (124, 125, 126, 127, 128, 129, 130)),
+)
 try:  # Agent C's module is the source of truth when it is importable.
     from rl.env import gym_obs as _gym_obs  # type: ignore
 
@@ -133,11 +140,14 @@ try:  # Agent C's module is the source of truth when it is importable.
     RELATIVE_FIELDS = tuple((n, float(s)) for n, s in _gym_obs.RELATIVE_FIELDS)
     CURATED_ACTION_STATES = tuple(
         int(s) for _n, s in _gym_obs.CURATED_ACTION_STATES)
+    FAMILY_FLAGS = tuple((str(n), tuple(int(x) for x in ids))
+                         for n, ids in _gym_obs.FAMILY_FLAGS)
     OBS_PROFILE = "gym_obs"
 except Exception:  # standalone fallback (identical values)
     SCALAR_FIELDS = _LOCAL_SCALARS
     RELATIVE_FIELDS = _LOCAL_RELATIVE
     CURATED_ACTION_STATES = _LOCAL_CURATED_STATES
+    FAMILY_FLAGS = _LOCAL_FAMILIES
     OBS_PROFILE = "local"
 
 ACTION_ONEHOT_SIZE = 32
@@ -153,6 +163,9 @@ _DX = 46
 _DY = 47
 _DIST = 48
 _FACING_REL = 49
+OBS_PER_FIGHTER = (len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE
+                   + len(RELATIVE_FIELDS) + len(FAMILY_FLAGS))
+OBS_DIM = 2 * OBS_PER_FIGHTER
 OBS_LIMIT = 1.0e6
 # Fields negated by a horizontal mirror (per fighter block).
 _MIRROR_NEG = (0, 2, 5, _DX)   # x, vx, facing, dx
@@ -241,14 +254,16 @@ def obs_from_raw(raw, normalize: bool = False) -> np.ndarray:
     raw physical values by default (Agent C's default, and therefore what the
     live env feeds the policy), or the CONTRACTS.md divisors with
     ``normalize=True``.  ``action_state`` uses C's curated 32-entry one-hot
-    (31 named states + OTHER); an unreadable slot is all zeros.
+    (31 named states + OTHER), followed by the six family flags
+    (escape/tech/ledge/catch/landing/shieldbreak); an unreadable slot is all
+    zeros.
     """
     raw = np.asarray(raw, dtype=np.float32)
     if raw.shape[-2:] != (2, len(FIELDS)):
         raise ValueError(f"raw_fighters must be (..., 2, {len(FIELDS)}); "
                          f"got {raw.shape}")
-    if len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE + len(RELATIVE_FIELDS) != \
-            OBS_PER_FIGHTER:
+    if len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE + len(RELATIVE_FIELDS) + \
+            len(FAMILY_FLAGS) != OBS_PER_FIGHTER:
         raise RuntimeError("observation profile does not match OBS_PER_FIGHTER")
     lead = raw.shape[:-2]
     blocks = []
@@ -281,6 +296,10 @@ def obs_from_raw(raw, normalize: bool = False) -> np.ndarray:
         for value, (name, scale) in zip(rel, RELATIVE_FIELDS):
             del name
             b[..., pos] = value / scale if normalize else value
+            pos += 1
+
+        for _name, ids in FAMILY_FLAGS:            # family flags from the status id
+            b[..., pos] = np.isin(states, ids).astype(np.float32)
             pos += 1
 
         np.clip(b, -OBS_LIMIT, OBS_LIMIT, out=b)

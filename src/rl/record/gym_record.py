@@ -357,7 +357,10 @@ def load_reset_fn(verbose: bool = True):
     match is restarted by hand.
     """
     candidates = []
-    for modname in ("gym_reset", "control_block"):
+    # Module-level helpers first: control_block.request_reset() opens and closes
+    # the block itself.  A class instance must be opened before it can be used
+    # (an unopened ControlBlock raises "control block is not open").
+    for modname in ("control_block", "gym_reset"):
         try:
             mod = importlib.import_module(f"rl.input.{modname}")
         except Exception:
@@ -372,6 +375,9 @@ def load_reset_fn(verbose: bool = True):
                 continue
             try:
                 obj = cls()
+                opener = getattr(obj, "open", None)
+                if callable(opener):
+                    obj = opener() or obj
             except Exception:
                 continue
             for name in ("request_reset", "reset", "do_reset"):
@@ -597,7 +603,7 @@ class RecorderCore:
     def __init__(self, out: str, episodes: int = 10, frame_skip: int = FRAME_SKIP,
                  meta: dict | None = None, reset: bool = True,
                  resume_window_s: float = 5.0, min_frames: int = 2,
-                 flush_every: int = 300, log=print):
+                 flush_every: int = 300, episode_frames: int = 0, log=print):
         self.out = out
         self.target = int(episodes)
         self.frame_skip = int(frame_skip)
@@ -606,6 +612,7 @@ class RecorderCore:
         self.resume_window = float(resume_window_s)
         self.min_frames = int(min_frames)
         self.flush_every = max(1, int(flush_every))
+        self.episode_frames = max(0, int(episode_frames))
         self.log = log
         self.manifest = read_manifest(out)
         self.done = scan_existing(out)
@@ -844,6 +851,12 @@ class RecorderCore:
                 seq = frame["seq"]
                 if self.ep.last_seq is None or seq > self.ep.last_seq:
                     self.ep.append(frame)
+                    if self.episode_frames and len(self.ep) >= self.episode_frames:
+                        # Cut here and ask the runtime for a rematch while the fight
+                        # is still live (R2 direct reset); the results screen is
+                        # never shown and the next episode starts on the new fight.
+                        self._finish(frame)
+                        return "split"
                     if len(self.ep) % self.flush_every == 0:
                         self._flush(partial=True)
                     event = "append"
@@ -902,6 +915,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resume-window", type=float, default=5.0,
                     help="max seconds of missing frames to resume a partial")
     ap.add_argument("--min-frames", type=int, default=2)
+    ap.add_argument("--episode-frames", type=int, default=0,
+                    help="cut an episode after N reader frames and rematch in-fight (0 = off)")
     ap.add_argument("--no-lock", action="store_true",
                     help="do not take /tmp/ssbu_game.lock (default: take it)")
     args = ap.parse_args(argv)
@@ -937,6 +952,7 @@ def main(argv: list[str] | None = None) -> int:
                   "build": detect_build()},
             reset=not args.no_reset, resume_window_s=args.resume_window,
             min_frames=args.min_frames, flush_every=args.flush_every,
+            episode_frames=args.episode_frames,
             log=lambda *a: print(*a, flush=True))
         if core.finished:
             print(f"[record] {len(core.done)} episodes already in {args.out}; "
@@ -972,6 +988,12 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     last_seq = frame["seq"]
                     event = core.feed(frame)
+                    if event == "split" and reset_fn is not None \
+                            and not core.finished:
+                        core.reset_requested_at = time.monotonic()
+                        print("[record] cut at %d frames: requesting an in-fight "
+                              "rematch" % args.episode_frames, flush=True)
+                        call_reset(reset_fn)
                     if event == "stop" and reset_fn is not None \
                             and not core.finished:
                         core.reset_requested_at = time.monotonic()

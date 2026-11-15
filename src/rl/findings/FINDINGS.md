@@ -1465,3 +1465,48 @@ Result after the gameplay hash (2026-11-14):
   changes with `SSBU_SPEED`.  The AI therefore uses yet another wall-clock
   dependent timer.  For training this is a stochastic-opponent difference, not
   a physics error; a bit-exact CPU opponent needs that timer virtualized too.
+
+### Observation profile v1.1 — action-state family flags (IL step)
+
+The 32-entry curated one-hot put roll/spot-dodge/air-dodge, tech, ledge
+options, grabs/throws, landing lag and shield break into `OTHER`, so a policy
+could not distinguish the defensive options that matter (especially for DK).
+Six 0/1 families over the raw status id follow the relative block:
+
+```
+is_escape       78 ESCAPE_F, 79 ESCAPE_B, 80 ESCAPE_AIR
+is_tech         71 PASSIVE, 72 PASSIVE_FB
+is_ledge        73 CLIFF_CATCH, 74 CLIFF_WAIT, 75/76 CLIMB_*, 77 CLIFF_ATTACK
+is_catch        43 THROW, 44-47 THROW_*, 48-53 CATCH*/THROW_CATCH
+is_landing      84 LANDING, 85 LANDING_AIR, 86 LANDING_FALL_SPECIAL
+is_shieldbreak  124-130 SHIELD_BREAK_*
+```
+
+Per fighter 50 -> 56 fields, observation 100 -> 112. The flags are derived
+from `action_state`, so `gym_bc.obs_from_raw` rebuilds them from the existing
+`raw_fighters` recordings — no re-record needed for this change. No character
+embedding yet: with one character in the dataset it would be a constant input.
+
+Recording protocol for the first DK model: DK (CPU 9) vs DK (CPU 9), Final
+Destination, 3 stocks / 5 minutes, items off, 1x, fixed seed, observer mode.
+Episode 0: 6418 frames (~107 s), 0 seq gaps.
+
+### IL recording: the slow reset had two causes
+
+1. The recorder's reset client built `ControlBlock()` but never opened it, so
+   every reset raised `control block is not open` and the match sat on the
+   results screen. `load_reset_fn` now prefers the module-level
+   `control_block.request_reset` (it opens/closes the block itself) and opens a
+   class instance when it has to use one.
+2. The runtime only resets a **live fight** (`rl_live()` = the FighterManager's
+   ready-go). After the last KO the results screen has no live fight, so a
+   reset is refused. The recorder now supports `--episode-frames N`: it cuts
+   the episode at N reader frames and asks for a rematch while the fight is
+   still live (SSBU_RL_MODE=1, direct rematch entry). The results screen is
+   never shown.
+
+Measured with DK (CPU 9) vs DK, 99 stocks / 99 min, `--episode-frames 5400`:
+episodes are exactly 5400 frames (90 s), 0 sequence gaps, ~100 s of wall time
+each including the in-fight reset (6 episodes in 10 minutes). The debug
+match's `stock=` and `time=` are re-applied at every ready-go, so the loop can
+run for as long as needed.

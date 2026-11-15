@@ -134,11 +134,15 @@ class TestLayout(unittest.TestCase):
             "cstick_y", "raw_flags"])
 
     def test_obs_profile_constants(self):
-        self.assertEqual(gym_obs.PER_FIGHTER_SIZE, 50)
-        self.assertEqual(gym_obs.OBS_SIZE, 100)
-        self.assertEqual(len(gym_obs.FEATURE_NAMES), 100)
+        self.assertEqual(gym_obs.PER_FIGHTER_SIZE,
+                         len(gym_obs.SCALAR_FIELDS) + gym_obs.ACTION_ONEHOT_SIZE
+                         + len(gym_obs.RELATIVE_FIELDS) + len(gym_obs.FAMILY_FLAGS))
+        self.assertEqual(gym_obs.PER_FIGHTER_SIZE, 56)
+        self.assertEqual(gym_obs.OBS_SIZE, 112)
+        self.assertEqual(len(gym_obs.FEATURE_NAMES), 112)
         self.assertEqual(gym_obs.FEATURE_NAMES[0], "p1_x")
-        self.assertEqual(gym_obs.FEATURE_NAMES[-1], "p2_facing_rel")
+        self.assertEqual(gym_obs.FEATURE_NAMES[-1], "p2_is_shieldbreak")
+        self.assertEqual(len(gym_obs.FAMILY_FLAGS), 6)
         self.assertEqual(gym_obs.ACTION_ONEHOT_SIZE, 32)
         self.assertEqual(len(gym_obs.CURATED_ACTION_STATES), 31)
         self.assertEqual(len(set(gym_obs.ACTION_STATE_ONEHOT.values())), 31)
@@ -272,13 +276,15 @@ class TestObservation(unittest.TestCase):
     def test_shape_dtype_and_order(self):
         s = self._snapshot()
         obs = gym_obs.build_observation(s)
-        self.assertEqual(obs.shape, (100,))
+        self.assertEqual(obs.shape, (112,))
         self.assertEqual(obs.dtype, np.float32)
         self.assertTrue(np.all(np.isfinite(obs)))
         self.assertEqual(gym_obs.SLICES["p1_scalars"], slice(0, 14))
         self.assertEqual(gym_obs.SLICES["p1_action"], slice(14, 46))
         self.assertEqual(gym_obs.SLICES["p1_relative"], slice(46, 50))
-        self.assertEqual(gym_obs.SLICES["p2_scalars"], slice(50, 64))
+        self.assertEqual(gym_obs.SLICES["p1_family"], slice(50, 56))
+        self.assertEqual(gym_obs.SLICES["p2_scalars"], slice(56, 70))
+        self.assertEqual(gym_obs.SLICES["p2_family"], slice(106, 112))
 
     def test_raw_values_and_one_hot(self):
         self.fix.set_fighter(
@@ -304,10 +310,13 @@ class TestObservation(unittest.TestCase):
         np.testing.assert_allclose(obs[46:50], [40.0, 30.0, 50.0, -1.0])
 
         # P2: unknown status -> OTHER (index 31 of its one-hot block)
-        p2_oh = obs[64:96]
+        p2_oh = obs[70:102]
         self.assertEqual(p2_oh.sum(), 1.0)
         self.assertEqual(int(p2_oh.argmax()), 31)
-        np.testing.assert_allclose(obs[96:100], [-40.0, -30.0, 50.0, 0.0])
+        np.testing.assert_allclose(obs[102:106], [-40.0, -30.0, 50.0, 0.0])
+        # RUN is no family
+        np.testing.assert_allclose(obs[50:56], np.zeros(6, dtype=np.float32))
+        np.testing.assert_allclose(obs[106:112], np.zeros(6, dtype=np.float32))
 
     def test_normalized_divisors(self):
         self.fix.set_fighter(0, x=100.0, y=-50.0, vx=25.0, vy=-10.0,
@@ -330,7 +339,7 @@ class TestObservation(unittest.TestCase):
         self.fix.set_state(n_fighters=0)
         s = self._snapshot()
         obs = gym_obs.build_observation(s)
-        np.testing.assert_array_equal(obs, np.zeros(100, dtype=np.float32))
+        np.testing.assert_array_equal(obs, np.zeros(112, dtype=np.float32))
         # no fake WAIT one-hot for empty slots
         self.assertEqual(float(obs[14:46].sum()), 0.0)
 
@@ -345,6 +354,23 @@ class TestObservation(unittest.TestCase):
             self.assertEqual(int(vec.argmax()), gym_obs.OTHER_INDEX)
             self.assertEqual(vec.sum(), 1.0)
 
+    def test_family_flags(self):
+        cases = {78: "is_escape", 80: "is_escape", 71: "is_tech",
+                 75: "is_ledge", 48: "is_catch", 43: "is_catch",
+                 85: "is_landing", 124: "is_shieldbreak", 130: "is_shieldbreak"}
+        names = list(gym_obs.FAMILY_FLAG_NAMES)
+        for state, name in cases.items():
+            f = {"x": 1.0, "action_state": state, "raw_flags": 1}
+            obs = gym_obs.build_observation([f, {}])
+            flags = obs[gym_obs.SLICES["p1_family"]]
+            self.assertEqual(float(flags[names.index(name)]), 1.0, state)
+            self.assertEqual(float(flags.sum()), 1.0, state)
+        # curated but not a family: no flag
+        for state in (0, 2, 10, 22, 54):
+            f = {"x": 1.0, "action_state": state, "raw_flags": 1}
+            obs = gym_obs.build_observation([f, {}])
+            self.assertEqual(float(obs[gym_obs.SLICES["p1_family"]].sum()), 0.0)
+
     def test_nonfinite_fields_are_sanitized(self):
         f = {"x": float("nan"), "y": float("inf"), "raw_flags": 1}
         obs = gym_obs.build_observation([f, {}])
@@ -355,7 +381,9 @@ class TestObservation(unittest.TestCase):
     def test_metadata_documents_exclusions(self):
         meta = gym_obs.observation_metadata()
         self.assertEqual(meta["profile"], "v1")
-        self.assertEqual(meta["size"], 100)
+        self.assertEqual(meta["size"], 112)
+        self.assertEqual([f["name"] for f in meta["family_flags"]],
+                         [name for name, _ids in gym_obs.FAMILY_FLAGS])
         for item in ("stock", "dead", "stage", "match_state", "opponent_id",
                      "controls", "projectiles"):
             self.assertIn(item, meta["excluded"])
@@ -559,7 +587,7 @@ class TestEnv(EnvCase):
             action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
             self.assertIn(obs, env.observation_space)
-            self.assertEqual(obs.shape, (100,))
+            self.assertEqual(obs.shape, (112,))
             self.assertEqual(obs.dtype, np.float32)
             self.assertIsInstance(reward, float)
             self.assertIsInstance(terminated, bool)
@@ -828,7 +856,7 @@ class TestEnv(EnvCase):
         env = self.make_env(normalize_obs=True)
         obs, _ = env.reset()
         self.assertAlmostEqual(float(obs[0]), -0.2)     # P1 x=-20 / 100
-        self.assertAlmostEqual(float(obs[50]), 0.2)     # P2 x=20 / 100
+        self.assertAlmostEqual(float(obs[56]), 0.2)     # P2 x=20 / 100
         obs2, _, _, _, _ = env.step(env.action_space.sample())
         self.assertIn(obs2, env.observation_space)
 

@@ -350,9 +350,11 @@ class GymObsCompatibilityTest(unittest.TestCase):
             np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5,
                                        err_msg=f"normalize={normalize}")
         # an unreadable slot is all zeros in both builders
-        np.testing.assert_allclose(bc.obs_from_raw(raw[5:6])[0, 50:], 0.0)
         np.testing.assert_allclose(
-            gym_obs.PolicyObservation().build(dicts[5])[50:], 0.0)
+            bc.obs_from_raw(raw[5:6])[0, bc.OBS_PER_FIGHTER:], 0.0)
+        np.testing.assert_allclose(
+            gym_obs.PolicyObservation().build(dicts[5])[gym_obs.PER_FIGHTER_SIZE:],
+            0.0)
 
     def test_curated_onehot_mapping(self):
         # C's 32nd slot is OTHER for unknown/out-of-range states.
