@@ -25,6 +25,11 @@ include = ["rl*"]
 
 [project.scripts]
 rl-wait-live = "rl.scripts.wait_live:main"
+rl-view = "rl.scripts.live_view:main"
+rl-verify-live = "rl.scripts.verify_live_state:main"
+rl-host-link = "rl.scripts.host_link:main"
+rl-turbo-check = "rl.scripts.turbo_check:main"
+rl-live-checks = "rl.scripts.live_checks:main"
 rl-record = "rl.record.gym_record:main"
 rl-train = "rl.bc.gym_bc:main"
 rl-eval = "rl.bc.gym_eval:main"

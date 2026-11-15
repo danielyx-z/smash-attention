@@ -40,6 +40,10 @@ land on the right Pro Controller buttons.
 Permissions: /dev/uinput must be writable by the user.  On this machine it is
 root:input with ACL user:daniel:rw-, and daniel is not in the input group, so
 the ACL (or `sudo setfacl -m u:daniel:rw /dev/uinput`) is what makes it work.
+The kernel creates the resulting /dev/input/eventN as root:root 0600, so
+create() also grants this user a read ACL on that node (setfacl, through
+passwordless `sudo -n` when needed).  Without that ACL SDL enumerates the pad
+and the game logs "connected", but every read fails and the pad never moves.
 
 One virtual pad may exist at a time: the pad lock /tmp/ssbu_pad.lock is held
 from UI_DEV_CREATE until UI_DEV_DESTROY.  Always use the context manager or
@@ -58,6 +62,7 @@ import glob
 import os
 import signal
 import struct
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -374,6 +379,7 @@ class VirtualPad:
             self._open_device()
             self._create_device()
             self.event_path = self._find_event_path()
+            self._grant_read(self.event_path)
             self.release_all()
         except BaseException:
             self.destroy()
@@ -458,6 +464,52 @@ class VirtualPad:
                 return sorted(matches, key=lambda p: int(p.rsplit("event", 1)[1]))[-1]
             time.sleep(0.02)
         return None
+
+    def _grant_read(self, path: str | None) -> bool:
+        """Make the created event node readable by this user.
+
+        The kernel creates ``/dev/input/eventN`` as ``root:root 0600``.  SDL
+        still enumerates the pad (and ``nn::pad`` prints ``connected``), but
+        every read fails, so the game sees a connected controller that never
+        sends a button or a stick value.  Grant a user ACL on the node;
+        passwordless sudo is used when the node is not ours.
+        """
+        if not path:
+            return False
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            os.close(fd)
+            return True
+        except OSError:
+            pass
+        uid = os.getuid()
+        commands = [
+            ["setfacl", "-m", f"u:{uid}:rw", path],
+            ["sudo", "-n", "setfacl", "-m", f"u:{uid}:rw", path],
+            ["sudo", "-n", "chmod", "a+rw", path],
+        ]
+        for cmd in commands:
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if r.returncode != 0:
+                continue
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                os.close(fd)
+                return True
+            except OSError:
+                continue
+        print(
+            f"warning: {path} is not readable by this user; SDL will see the "
+            "virtual pad but receive no events. Run "
+            f"'sudo setfacl -m u:{uid}:rw {path}' or add a udev rule "
+            "(MODE=\"0666\") for the 'SSBU Virtual Pad' input device.",
+            file=sys.stderr,
+        )
+        return False
 
     def destroy(self) -> None:
         if self.fd is not None:

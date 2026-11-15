@@ -4,6 +4,7 @@
 Two shared-memory blocks are involved:
 
   /dev/shm/ssbu_control.bin  reset_seq / ack_seq / state   (control_block.py)
+                             v2, 80 bytes; v1 (24-byte) files still read
   /dev/shm/ssbu_state.bin    reader frames, fight_on, seq (B's state bridge)
 
 Protocol:
@@ -206,7 +207,7 @@ class MockRuntime:
                     self._fight_on = 0
                     self._match_state = 0
         return ControlBlockSnapshot(
-            control_block.MAGIC, control_block.VERSION, self.reset_seq,
+            control_block.MAGIC, control_block.CURRENT_VERSION, self.reset_seq,
             self.ack_seq, self.state, 0)
 
     def request_reset(self) -> int:

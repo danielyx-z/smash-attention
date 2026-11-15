@@ -30,7 +30,9 @@ from rl.memory import schema
 from rl.memory.gamestate import GameState
 from rl.memory.memapi import check_access, find_game_pid, ptrace_scope
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+RLROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+REPO = os.environ.get("SSBU_RECOMP_DIR") or os.path.abspath(
+    os.path.join(RLROOT, "..", "ssbu-recomp"))
 
 _SEQ = struct.Struct("<I")
 _TS = struct.Struct("<Q")
