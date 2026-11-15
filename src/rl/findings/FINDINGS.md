@@ -1448,3 +1448,20 @@ remaining speed-dependent input is the animation frame delta (a presentation
 clock, most likely the nvn/display frame interval).  The next fix is to feed
 that delta 1/60 per game frame, or to exclude the animation frame from a
 gameplay-only turbo hash (the RL observation still includes it).
+
+Result after the gameplay hash (2026-11-14):
+
+* human/idle, 1x vs 4x, 300 frames: **300/300 gameplay hashes match**.  The
+  fighter physics, status, damage, stock and RNG are turbo-correct.
+* `state_hash` now excludes `motion+0x70` (the presentation action frame) by
+  default; `SSBU_RL_HASH_FULL=1` includes it for animation research.  The
+  action frame is the only field that differs (the 4x idle action loops every
+  48 frames vs 192 at 1x); its source is still an unidentified presentation
+  clock (not GetSystemTick/GetCurrentTime, the clock origin, the match seed,
+  the keyboard, or the battle-scene hook).
+* CPU-vs-CPU, 1x vs 4x: **0/300 hashes match even with the action frame
+  excluded**, at every phase shift.  1x vs 1x CPU matches after the recorded
+  phase anchor, so the CPU AI is deterministic at 1x but its decision timing
+  changes with `SSBU_SPEED`.  The AI therefore uses yet another wall-clock
+  dependent timer.  For training this is a stochastic-opponent difference, not
+  a physics error; a bit-exact CPU opponent needs that timer virtualized too.
