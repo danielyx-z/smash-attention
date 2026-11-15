@@ -1410,3 +1410,28 @@ remaining time reads at the countdown->battle transition.
 To reproduce: human/idle match, `SSBU_FIXED_SEED=12345`, `SSBU_SPEED=1` and
 `SSBU_SPEED=4`, `turbo_check record --settle 30 --expect-speed ...`, then
 `turbo_check compare ... --max-shift 2`.
+
+## 4x divergence is only the action frame at the GO transition (2026-11-14)
+
+`SSBU_RL_HASHDUMP=<path>` now records every value that enters `rl_state_hash`
+at the exact sampling point (live, entry presence, stock/cpu/rebirth, pos
+x/y/z/facing, status kind, situation, motion frame, damage, RNG words) plus
+the hash.  Comparing 1x and 4x human/idle at the first differing frame:
+
+```
+rel 89  mf1=0x423c0000 (47.0)  both, hashes equal
+rel 90  mf1=0x42400000 (48.0)  1x
+        mf1=0x00000000 ( 0.0)  4x   <- only differing field
+rel 91  mf1=49.0 vs 1.0         <- still the only differing field
+```
+
+So at the battle-start/GO transition the 4x run **restarts P1's action**
+(frame 0) while 1x continues the running idle action (frame 48).  Positions,
+facing, status kind/situation, damage, stock, CPU/rebirth and all four RNG
+words are identical on every frame; the hash cascade is entirely the action
+frame.  This is not the frame clock (the scene-hook advance and the virtual
+time-of-day did not change it); it is the GO transition's action reset, whose
+timing differs between the speeds.  Next: find the GO timer that restarts the
+action and make it frame-based, or decide explicitly whether the action frame
+is presentation state for turbo purposes (the RL observation still contains
+it, so an offset is not free).
