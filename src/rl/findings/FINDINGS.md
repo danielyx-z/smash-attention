@@ -1435,3 +1435,16 @@ timing differs between the speeds.  Next: find the GO timer that restarts the
 action and make it frame-based, or decide explicitly whether the action frame
 is presentation state for turbo purposes (the RL observation still contains
 it, so an offset is not free).
+
+Confirmed with the in-hash dump: the 4x action frame restarts every **48**
+game frames (42, 90, 138, 186, 234) while the 1x loop is **192** frames
+(43, 235).  The ratio is exactly the speed (192/4 = 48), so the action/animation
+loop length is still derived from the real frame delta (16.7 ms at 1x,
+4.17 ms at 4x), not from the fixed `GetSystemTick`/`GetCurrentTime` clock.
+Positions, facing, status kind/situation, damage, stock, CPU/rebirth and the
+four RNG words are identical on every frame; the hash cascade is entirely the
+animation frame.  So the fighter/physics/AI simulation is turbo-correct; the
+remaining speed-dependent input is the animation frame delta (a presentation
+clock, most likely the nvn/display frame interval).  The next fix is to feed
+that delta 1/60 per game frame, or to exclude the animation frame from a
+gameplay-only turbo hash (the RL observation still includes it).
