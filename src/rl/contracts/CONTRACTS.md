@@ -257,3 +257,29 @@ action chunk H=4.
 - `tools/mem/memmap.json`: core evidence (B).
 - `tools/mem/extra_map.json`: extra evidence (F).
 - Append findings as you go; do not rewrite another agent's section.
+
+### Two-player synthetic pads (`/dev/shm/ssbu_pads.bin`, SSBP v1)
+
+For self-play the recomp reads two synthetic XInput pads from one block
+(`SSBU_PAD_FROM_CTL=1`): slot 0 = player 1, slot 1 = player 2.  No uinput, no
+SDL, no hot-plug, no per-command ack; both players are read from one snapshot
+per game frame.
+
+    0   char4  "SSBP"
+    4   u32    version 1
+    8   u32    seq      (odd while the writer updates; even when stable)
+    12  u32    players 2
+    16  ...    reserved
+    24  Pad[2], 24 bytes each:
+        +0   u32  buttons (XInput mask; console A = 0x2000, B = 0x1000,
+                  X = 0x8000, Y = 0x4000, L = 0x0100, R = 0x0200,
+                  PLUS = 0x0010, MINUS = 0x0020, dpad 0x1/0x2/0x4/0x8)
+        +4   s16  lx      +6   s16 ly
+        +8   s16  rx      +10  s16 ry
+        +12  u8   lt      +13  u8  rt
+        +14  u16  flags (bit 0 connected)
+        +16  ...  reserved
+
+`rl.input.pads_block.PadsBlock` writes it.  Player 1 is verified live.  Player
+2 still needs the game's own controller assignment (the debug match sets the
+player type, not the controller port); see FINDINGS.
