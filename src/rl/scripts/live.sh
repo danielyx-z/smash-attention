@@ -71,12 +71,19 @@ sleep 1
 # not keep this script (or its caller's pipe) alive.
 if [[ $ATTACH -eq 0 ]]; then
     echo "starting game (log: ~/smash.log)"
+    # play.sh drops every SSBU_* variable of its own environment (run.py), so
+    # any runtime switch this script was started with has to be passed --env.
+    EXTRA_ENV=()
+    while IFS= read -r kv; do
+        [[ -n "$kv" ]] && EXTRA_ENV+=(--env "$kv")
+    done < <(env | grep -E '^SSBU_' | grep -vE '^SSBU_LIVE_')
     setsid nohup bash -c 'cd "$1" && shift && exec "$@"' _ "$REPO" \
         ./play.sh \
         --env SSBU_SKIP_MOVIES=1 \
         --env "SSBU_KEYBOARD_PLAYER=$KB_PLAYER" \
         --env SSBU_RL=1 \
         --env "SSBU_DEBUG_MATCH=$MATCH" \
+        "${EXTRA_ENV[@]}" \
         > "$HOME/smash.log" 2>&1 < /dev/null &
     disown
 fi
