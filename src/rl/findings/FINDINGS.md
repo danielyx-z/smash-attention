@@ -1048,3 +1048,365 @@ tests, OK (~1.5 s)** including the early-stop and shield tests.
   battle-object owner/category layout, match timer/platform geometry, and a
   guest-side frame counter.  These are listed in `extra_map.json` →
   `unverified`.
+
+## Coordinator — live state verification (2026-11-14)
+
+New tool: `src/rl/scripts/verify_live_state.py` (`python -m
+rl.scripts.verify_live_state`). It samples the v7 block at 60 Hz and checks
+every field two ways: (a) field-to-field invariants that must hold on every
+frame, (b) known input -> known state, in three modes:
+
+* `physical` — P1 human + uinput pad; pad script (walk, jump, shield, attack,
+  special, C-stick, trigger). Requires SDL keyboard focus.
+* `cpu` — observe a CPU-vs-CPU fight; validates the expert control fields and
+  the lifetime/rule header.
+* `seq` — `SSBU_XINPUT_SYNTH=1` + `SSBU_SEQ=<text>`; the recomp's synthetic pad
+  drives P1 from a scripted sequence, independent of window focus. This is the
+  mode that actually worked in this environment.
+
+### Verified (seq run: synthetic pad, known keys)
+
+`@draws:206-450/60 280` boot part of `tests/seq_battle_play.txt`, then
+`r/80, l/80, C, C, A, Z, X, V`. 1340 sampled frames, 900+ live:
+
+* P1 walked right then left: x range `[-144.9, 76.2]`, facing flipped `+1/-1`.
+* jump: y `0 -> 52.6`, `on_ground` 1->0, `jumps_left` 2->1, status 11/12.
+* shield: status **10**, `shield=1`, 23 frames.
+* attacks: statuses `{24, 27, 28, 29, 34, 45}`; special: `{41}`.
+* expert fields follow the pad: masks `{0x8000, 0x8004, 0x8008, 0x8201,
+  0x8802}` (0x1/0x2/0x4/0x8 = A/B/X/Y), `stick_x/y` reach +-1.
+* `dx/dy` = opponent - self (max err 6e-6), `facing_rel` 100 % consistent,
+  `dist_to_blast` recomputes from the live camera bounds, `vx/vy` = d(pos)/dt.
+* `shield <=> status 10` and `hitstun <=> DAMAGE statuses` hold for both slots.
+* no NaN/Inf; `raw_flags=0x7fffffff`.
+
+### Verified (cpu run after an R2 reset)
+
+Clean start (damage 0/0), Mario/DK, `is_cpu` 1/1, 1200 sampled frames:
+expert buttons populated **every** frame, `|stick|` reaches 1.0, trigger max
+0.0079, `stick_x` sign agrees with `vx` in 94 % of grounded frames,
+`is_actionable=1` in 100 % of WAIT frames and 0 in 95 % of hitstun/tumble.
+
+### Corrections to earlier notes
+
+* **The ControlModule mask is not "AI-only".** A synthetic pad's face buttons
+  and sticks appear in `buttons`/`stick_x/y` exactly as pressed. The earlier
+  "P1 human + pad reads 0" was an **input-delivery** failure, not a bridge
+  property: pads and keyboard are gated on `SDL_GetKeyboardFocus()` (see
+  `runtime/nnhid.c:keyboard_ours`), and X focus + `_NET_ACTIVE_WINDOW` being
+  the game is *not* enough. After a GNOME lock/unlock the SDL flag stayed
+  unset even with a focus cycle and a real click; the keyboard failed
+  identically. `--shield-from-status` is still right for **ZL/ZR**, because
+  the virtual pad drives them as analog triggers (ABS_Z/RZ) and they do not
+  appear as mask bits.
+* **The virtual pad was not broken.** In the game's menus it dismissed an
+  unlock popup and navigated the Challenges screen (A). The match failures
+  were entirely the focus gate.
+* **`rule_kind=1 (stock), stock=0`** confirmed live from the extra block
+  (`g.match.rule_kind`, `g.match.stock`).
+* **`SSBU_SEQ` is inline text, not a file.** `scripts/run.py --seq` reads the
+  file, drops `#` comments and sets `SSBU_SEQ` to the joined text; the
+  synthetic pad needs `SSBU_XINPUT_SYNTH=1`. Passing a path yields
+  `input sequence: bad step <path>` and zero steps.
+
+### New caveats found
+
+* **Stale rows at `fight_on` 1.** `impl+0xd2` goes to 1 a few frames before
+  the entries hold the new match; the first ~15 frames can still carry the
+  previous match's `kind`/`damage` (observed 5/37, 51/50, 60/30 and kind 8).
+  `wait_live` now requires the `(kind, entry_id)` tuple to be stable for 20
+  new frames. The R2 reset zeroes damage (`DamageModule__init_damage_impl`),
+  which is why the recorded datasets start at 0 %.
+* **`action_frame` resets to 0** when a new action instance reuses the same
+  status kind (observed in 54, 72, 119). This is a reset, not a torn read; the
+  invariant now allows a reset to <=1 and only flags other decreases.
+* **Sim rate under GPU load.** With the Isaac Sim job holding ~7.6/8 GB of the
+  RTX 3070, the guest runs at ~15 fps (`action_frame` +0.25 per 60 Hz sample,
+  long stalls), the renderer showed stale/white frames, and one launch died
+  with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. Wall-clock timing tests are invalid
+  under that load; use `resolution_scale=0.5`, `shader_load=loading`,
+  `shader_prepare=off` (backed up from `graphics.ini`) as a stopgap.
+* **15 s episodes are still not explained.** The reset rematch ran >20 s wall
+  (>300 sim frames at 15 fps) with no `fight_on` transition, so 900 frames is
+  not a hard timer. The recorded 901-923-frame lengths are consistent with a
+  first KO at 60 fps, but their last frames carry no KO/DEAD state and damage
+  is not reset. Check on a healthy GPU (or decode the match block's time
+  field) before treating them as natural terminal states.
+
+### Still unverified live
+
+`cstick_x/y` (CPUs never set it and the keyboard sequence has no C-stick),
+`shield_size` (no source, always 0), `game_frame` (reader counter), and
+`stock`'s non-zero value.
+
+### Harness fixes in this pass
+
+* `rl/memory/reader.py`: `REPO` resolved to `ssbu-rl/src` after the move, so
+  `reader.py --spawn` could not find `play.sh`; it is now
+  `$SSBU_RECOMP_DIR` or the sibling `ssbu-recomp`.
+* `rl/utils/game_session.py`: `SSBU_KEYBOARD_PLAYER` is taken from the
+  environment (was hardcoded 0) and a repeatable `--env KEY=VALUE` is added
+  for the game (used for `SSBU_SEQ`/`SSBU_XINPUT_SYNTH`).
+
+## Coordinator — live stage view (2026-11-14)
+
+`src/rl/scripts/live_view.py` is the new second window: a data-only 2D view of
+the match.  It replaces `rl.tests.verify_gui` in `src/rl/scripts/live.sh`
+(`verify_gui.py` stays as the text-only fallback).
+
+* Canvas: blast-zone box, a **Final Destination outline assumed** from the
+  state (platform at world y=0, x -100..100), a 50-unit grid, one box per
+  fighter (damage-tinted, facing wedge, shield bubble, position trail,
+  `P1 MARIO 41%` + state badge like `AIRBORNE`/`HITSTUN`/`SHIELD`), and one
+  marker per battle object from `bom.obj.*`.
+* Side panel: every v7 field for both slots (decoded buttons, state names,
+  raw hex toggle), match/rule header, per-fighter extras (stock/dead, shield
+  parts, hitlag, kinetic speed, floor y), and a bounded event log
+  (`P1 WAIT -> JUMP_SQUAT`, `fight_on 0 -> 1`, shield/hitstun on/off).
+* Sources: `/dev/shm/ssbu_state.bin` at 60 Hz; `--extra auto` prefers
+  `/dev/shm/ssbu_extra.bin` and otherwise samples `ExtraState` directly at
+  12 Hz (so projectiles work with no extra reader); `--extra off` hides them.
+* `--mock` animates two fighters and a projectile with no game;
+  `--mock --dump-once --json` prints one model headlessly.
+* Tests: `test_live_view.py` (15 tests: world map, state labels, extra object
+  filtering, fighter-accessor exclusion, mock source, events, fake v7 block
+  through `ShmSource`, CLI dump).  Full suite: 163 passed, 5 skipped.
+* Not drawn: hitboxes (no accessor) and true platform geometry (FD assumed).
+  `bom.obj` fighters are filtered by matching `bom.obj.accessor` against
+  `f.accessor` slot 1/2.
+
+## Build incident — never relink the game .so from a cold object cache (2026-11-14)
+
+While adding a stock override to `runtime/debug_mode.c`, `build.py link` was
+run to rebuild only the host binary.  Its first step, `build_game_dll()`,
+checks whether the `.so` is newer than everything in `obj_eh_o1`.  That
+directory held **no `.obj` files** (only 829 interrupted `.tmp` files and one
+stray object), so the check failed and the ~553 MB
+`ssbu_game_eh_o1.so` was relinked from the data objects alone: a 3 MB library
+that overwrote the working one.  No `.so` backup existed (only `ssbu_native`
+had been copied).  This is the trap Agent A warned about in the final-status
+notes; the warning was accurate.
+
+Recovery: the lifted sources are intact (`build-linux/work/gen_eh_o2`, 1.3 GB,
+1161 files), so the canonical
+`deps/venv/bin/python scripts/setup.py --target linux --dump /home/daniel/Projects/SSBU/dump`
+recompiles all game objects and relinks (the slow files are first; tens of
+minutes).  After a good build, **back up both**
+`build-linux/work/ssbu_game_eh_o1.so` and `build-linux/work/ssbu_native`.
+
+The host-side link also needed `-Wl,--allow-shlib-undefined` while the old
+.object cache was missing; after the full rebuild the `.so` defines its lifted
+symbols and the stock build.py line should work unchanged (the temporary
+`build-linux/work/build.py` patch is backed up at `/tmp/opencode/build.py.bak`).
+
+Pending verification: the `SSBU_DEBUG_MATCH stock=<n>` override now writes the
+match block `+0x05` (rule kind = stock) / `+0x0A` (count) and both
+FighterInformation records `+0xD8` at ready-go.  Whether the game then runs a
+real N-stock match (instead of the saved 0-stock first-KO match) is unconfirmed
+until the rebuilt binary boots.
+
+Tool for the future: `src/rl/scripts/host_link.py` (`rl-host-link`).  It stages
+`runtime/<file>.c` into `build-linux/work/`, backs up the current
+`ssbu_native`, compiles only the stale host objects, and links the exe against
+the **existing** `ssbu_game_eh_o1.so` with `build_game_dll()` monkeypatched
+out.  It refuses when a full build is running or when the `.so` is <100 MB,
+takes `/tmp/ssbu_build.lock`, and restores the old exe on failure.  Use it for
+any `debug_mode.c` / `nnhid.c` / `display.c` / header change instead of
+`build.py link`; see "Host-only rebuild" in `MIGRATION.md`.
+
+## uinput virtual pad: event-node permissions (2026-11-14)
+
+The virtual pad was being injected correctly but the game could not read it.
+`VirtualPad` writes to `/dev/uinput`; the kernel creates the corresponding
+`/dev/input/eventN` as **root:root 0600**.  SDL still enumerates the device and
+the game logs `nn::pad: connected "Xbox 360 Controller" ... -> player 1`, but
+every `read()` on the node fails, so the pad state is permanently zero.
+
+`VirtualPad.create()` now calls `_grant_read()` on the node: it grants the
+current uid a read ACL (`setfacl`, through passwordless `sudo -n` when the node
+is root-owned; otherwise a clear warning with the exact command).  Verified:
+
+* reading the node shows `EV_KEY BTN_SOUTH 1/0` and `EV_ABS ABS_X 32767`;
+* `test_gym_input.py --live` is **35/35**: SDL 3.2.6 sees GUID
+  `030049205e0400008e02000014010000`, every canonical button lands on its Pro
+  button, sticks/C-stick/trigger all read.
+
+Host rebuilds now refuse while the game is running (`ETXTBSY`: the running
+executable cannot be replaced); stop the game first, link, restart.  That guard
+is in `rl.scripts.host_link` and documented in MIGRATION.md.
+
+Still open: the **in-game** P1 test (`p1=human`) still shows `dx=0` even with a
+real `focus_game.sh` click.  The pad-test proves the SDL/uinput side, so the
+remaining gate is the game's `player_connected`/`fill_pad` path or the debug
+match's controller/save roster.  `SSBU_RL_INPUT_DEBUG=1` (nnhid.c) prints
+`input dbg: id0 ...` with `connected`, `styles`, `idok`, `nnpad_present`, the
+nnpad button/stick state and the final output state; it is in the current host
+binary for the next clean boot.
+
+## uinput in the game works: the earlier `dx=0` was the harness (2026-11-14)
+
+The "P1 does not move" result was not an input-gate problem.  Two harness
+mistakes produced it:
+
+* **The game was still in its menus.**  `SSBU_DEBUG_MATCH` forces the select
+  screens and the rules, but nothing walks from the title screen to the
+  character select.  A run without a menu walk sits in `match=MENU`
+  (`fight_on=0`, no fighters) forever; taps every second are not enough
+  (`live_checks focus` used to do only that).
+* The ad-hoc probe accepted the **first** `fight_on=1` block, which could be
+  the previous run's last frame or a match already near its end, and then read
+  `dx=0` after the match was over.
+
+The working headless recipe (all inside one `game_session run`):
+
+```sh
+SEQ="$(grep -v '^#' seq_nav.txt | tr '\n' ' ')"   # menu walk, no battle inputs
+.venv/bin/python -m rl.utils.game_session run --owner x --restart-game \
+  --restart-reader --keep-game \
+  --match 'p1=mario,p1=human,p2=donkey,p2=cpu,cpu=1,stage=end,players=2,items=off,stock=3' \
+  --env SSBU_INPUT_NO_FOCUS=1 --env "SSBU_SEQ=$SEQ" -- \
+  bash -lc '.venv/bin/python -m rl.scripts.wait_live 150 && \
+            .venv/bin/python -m rl.scripts.live_checks focus --json --hold 2'
+```
+
+`seq_nav.txt` is `tests/seq_battle_play_fast.txt` cut after the "ready to
+fight" press: it walks boot -> Smash -> rules -> stage -> character select with
+the recomp's scripted pad and then leaves P1 alone.  With
+`SSBU_INPUT_NO_FOCUS=1`, `devices_live()` is 1 even in a scripted run, so the
+SDL/uinput pad is still merged into P1's state after the walk.
+
+Verified on the current host binary:
+
+* `live_checks focus` **passes**: 121 live frames, `dx=153.67`, the window was
+  **not** focused (`X11 focus is on ... not on the game window`), stocks 3/3,
+  `is_cpu=[0,1]`.
+* The same hold through a bare `pad_verify.py` gave `dx=154.88`, action states
+  0/4/7/14 (idle/walk/run), with `input dbg: out id=0 kind=1 b=40000
+  lx=32767`.
+
+One run failed with `dx=0` and no nnpad "connected" line at all: the game's
+watchdog shows a **1-2.4 s stall at the ready-go** (shader pipelines), and the
+fixed 2 s hold fell entirely inside it, so the game's input poll never ran and
+the pad was destroyed before it resumed.  `hold_right_and_collect` now holds
+until P1's state has shown the stick/buttons for `--hold` seconds, with
+`DEFAULT_HOLD_GRACE` (4 s) of extra time for such a stall, and
+`evaluate_focus_motion` fails with "the game received the pad input" when the
+expert `buttons`/`stick_x` stay 0 the whole time.  (Repeated live runs on this
+desktop later hit unrelated `VK_ERROR_OUT_OF_DEVICE_MEMORY` on llvmpipe and a
+`BadRROutput` X error after a monitor/session change; those are environmental.)
+
+`live_checks focus` now skips its A taps when `SSBU_SEQ`/`SSBU_PLAY` is set
+(`scripted_menus()`): an extra A during the scripted walk skips a menu item and
+loses the anchors, which is why the check previously timed out even with the
+walk running.  It still requires a **live** match; start the walk first (the
+recipe above) or start a match by hand.
+
+`SSBU_RL_INPUT_DEBUG=1` (nnhid.c) now prints one throttled line per npad id
+(`input dbg: poll id=... kind=... conn=... got=...`) and, when the state is
+non-zero, the final output (`input dbg: out id=... b=... lx=...`); it is
+environment-gated and stays in the host binary.
+
+## Characters from code, and why the state view said Mario/DK (2026-11-14)
+
+`SSBU_DEBUG_MATCH` already accepts `p1=<fighter>` / `p2=<fighter>` and forces
+`ui_chara_<name>` in the select-screen panel at every match set-up
+(`runtime/debug_mode.c`, `panel_copy_hook` / `match_player_hook`).  A live run
+with `p1=samus,p1=human,p2=kirby,p2=cpu,cpu=9` really spawned **Samus (kind 3)
+vs Kirby (kind 6)**; the runtime's fight-on line said so and the game window
+showed them.
+
+The state block still reported `kind 0` (Mario) and `kind 8` (Donkey Kong).
+`gamestate.py` read the kind from the fighter **information record**
+(`entry+0xF8`, `+0x30` = kind+1).  That record is the select-screen copy: when
+the debug hook forces a character by name it still carries the saved roster.
+The match's own player record (13.0.4 match block at guest `0x71052c4730`,
+record n at `+0x260*n`, **+8 = fighter kind**) has the kind that actually
+spawned.  `read_fighter` now prefers that byte and falls back to the
+information record.  After the fix the reader/viewer show `kind 3 / 6`
+(SAMUS / KIRBY) for the same match.
+
+`fighter_kind_by_name()` (the numeric kind used only in the parse log) looks
+for `..\reference\skyline-smash\src\lua_const.rs`, a Windows path that does not
+exist here, so the launch log prints `p1 kind -1` even though the name is
+applied.  The name is what matters; the log is cosmetic.
+
+### Viewer "hang"
+
+`live_view` was fine, but two things kept it on a frozen picture:
+
+* `game_session --keep-game` left the game running and stopped the reader it
+  had started, so `/dev/shm/ssbu_state.bin` never advanced.  `--keep-game` now
+  keeps the reader too.
+* `RawSnapshotReader.read_latest()` keeps returning the newest complete frame,
+  even when it is hours old.  The viewer re-rendered that same `seq` at 60 Hz
+  (a frozen picture, ~13% CPU) and never said anything was wrong.  `live_view`
+  now skips repeated `seq`s and shows
+  `STALE: last frame N.Ns old — is rl.memory.reader running?`.
+
+Character selection from code is documented in `MIGRATION.md`; the helper is
+`rl.utils.match_config` (`MatchSpec`, `write_match_list`, `append_match`).
+
+## Turbo proof: the state hash works, and 4x is not simulation-identical yet (2026-11-14)
+
+The v2 control block publishes `game_frame` + `state_hash` every presented
+frame, and `rl.scripts.turbo_check` records/compares them.  The checker was
+hardened for real runs:
+
+* it records only `fight_on` frames (boot/menu frames have different relative
+  positions in two launches and misaligned every comparison);
+* the runtime now puts the game pid's low 24 bits in `flags` bits 8..31;
+  `record` rejects a block left by another process and restarts if the epoch
+  changes, so a stale block cannot poison a run;
+* it accepts a sample only after `--stable-reads` agreeing reads (the v2 block
+  has no seqlock; a torn read was the earlier "1 frame then fight_off");
+* it fails if the first live frame has `seed=0` (no `SSBU_FIXED_SEED`) or if
+  `--expect-speed` does not match the block (catches `SSBU_SPEED` not reaching
+  the game);
+* `--settle` skips the first frames after fight_on and `--end-grace` ignores
+  short fight_on dropouts.
+
+Verified with `SSBU_FIXED_SEED=12345`, the same nav sequence, Mario vs Kirby,
+both human and idle:
+
+* **1x vs 1x: 600/600 hashes match** -> the recorder and the hash are reliable,
+  and two launches start from the same state in this setup.
+* **1x vs 4x: first divergence at relative frame 80** (600 common frames).
+  Since 1x vs 1x passes, this is caused by turbo, not launch noise: some part
+  of the fighter simulation still follows wall-clock time rather than one step
+  per presented frame.  `motion + 0x70` (action frame) is the first suspect.
+* CPU-vs-CPU matches are **not** deterministic across launches even at 1x
+  (divergence at relative frame 30): the CPU AI/script generators use a match
+  seed that `SSBU_FIXED_SEED` (re-seeding the global generator at ready-go)
+  does not fully control.  Use human/idle players, or a frame-synced pad, for
+  turbo checks.
+
+So the hash is in place and does its job; turbo is **not proven correct yet**.
+The next step is to make `SSBU_SPEED` step the simulation identically (frame
+delta, not wall-clock delta) and then rerun 1x vs 4x/8x.
+
+## Fixed frame clock: 1x is deterministic, 4x still diverges (2026-11-14)
+
+Why 1x vs 1x CPU-vs-CPU diverged: the CPU AI and the fight's timers read
+`nn::os::GetSystemTick`, which returned the real monotonic clock.  Frame-time
+jitter moved the AI's decisions to different frames between launches.  The
+fixed frame clock (`SSBU_FIXED_CLOCK`, default with `SSBU_FIXED_SEED`/
+`SSBU_SPEED`) makes every game frame exactly 1/60 s, and the v2 hash is now
+sampled on the game thread (player 1's pad poll) instead of the presenting
+thread.  With that, two 1x CPU-vs-CPU launches produce the **same 600-frame
+hash sequence** (the recorder reports a one-frame phase anchor from the live
+flag; the tool tolerates it with `--max-shift` and warns).
+
+4x is **not yet simulation-identical**.  Human-vs-human idle, 1x vs 4x,
+diverges at about relative frame 90, i.e. at the end of the countdown when the
+battle becomes active, and stays different afterwards.  The divergence is
+reproducible per speed (all 4x launches share the same 4x hashes), so it is a
+speed-dependent input to the battle-start state, not launch noise.  The fixed
+`GetSystemTick` and `GetCurrentTime` did not remove it; the remaining source is
+another clock read at the battle start (or a value derived from the absolute
+clock, whose origin still differs with boot time).  Next: make the frame
+clock's origin fixed (not the real tick at the first poll) and/or trace the
+remaining time reads at the countdown->battle transition.
+
+To reproduce: human/idle match, `SSBU_FIXED_SEED=12345`, `SSBU_SPEED=1` and
+`SSBU_SPEED=4`, `turbo_check record --settle 30 --expect-speed ...`, then
+`turbo_check compare ... --max-shift 2`.

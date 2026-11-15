@@ -61,7 +61,9 @@ pad I
 
 ```
 0  entry_id        i32
-1  kind            i32
+1  kind            i32   (spawned fighter kind; match record +8, not the
+                          select-screen information record, which keeps the
+                          saved roster when SSBU_DEBUG_MATCH forces a name)
 2  stock           i32   (read as u32 from record+0xD8, stored signed)
 3  damage          f32
 4  x               f32
@@ -104,21 +106,65 @@ Rules:
 - Empty slot = all zero bytes, raw_flags = 0.
 - Odd/even `seq` protocol exactly as before.
 
-## Reset control block: `/dev/shm/ssbu_control.bin`
+## Reset + status control block: `/dev/shm/ssbu_control.bin` (SSBC v2)
 
-Owner: D. Runtime polls it. Proposed layout (D may refine, document it here):
+Owner: D. Runtime polls it. The first 24 bytes are the v1 reset layout, so old
+readers keep working; v2 appends per-frame status and a small command channel.
 
 ```
-magic 4s "SSBC"
-version I
-reset_seq I      # env increments to request a reset
-ack_seq I        # runtime copies reset_seq when reset is done
-state I          # 0 idle, 1 requested, 2 running, 3 done, 4 error
-pad I
+offset  type  field
+0       4s    magic "SSBC"
+4       I     version (2)
+8       I     reset_seq      env increments to request a reset
+12      I     ack_seq        runtime copies reset_seq when the reset is done
+16      I     state          0 idle, 1 requested, 2 running, 3 done, 4 error
+20      I     flags          bit0 fight_on, bit1 reset_busy, bit2 pad_active,
+                             bit3 turbo, bit4 pad_from_ctl, bit5 fixed_seed,
+                             bit6 hash_valid, bits 8..31 epoch (game pid low
+                             24 bits; a block from another process is stale)
+24      I     game_frame     game frame: player 1 pad poll index
+                             (runtime-written on the game thread; one per step)
+28      I     state_hash     FNV-1a of the fighter simulation (runtime)
+32      I     seed           runtime echo of the last set_seed
+36      I     cmd_seq        writer increments for every command
+40      I     cmd            0 none, 1 set_seed, 2 set_pad, 3 clear_pad
+44      I     arg0           seed (cmd 1) / target frame hint (cmd 2, 0 = next)
+48      I     arg1           XInput button mask (cmd 2)
+52      I     arg2           left stick: int16 x | int16 y << 16
+56      I     arg3           C-stick: int16 x | int16 y << 16
+60      I     cmd_ack        runtime echoes cmd_seq when the command ran
+64      I     ack_frame      game_frame when it ran
+68      I     speed_milli    runtime echo: 1000 = 1x, 0 = uncapped (SSBU_SPEED)
+72      I     pad0           triggers, lt | rt << 8
+76      I     pad1           match-start game_frame (turbo_check base)
 ```
 
-The env writes `reset_seq += 1`; the runtime acknowledges; the env waits for
-`ack_seq == reset_seq` and `fight_on == 1` plus stable spawn frames.
+Reset protocol unchanged: the env writes `reset_seq += 1`, the runtime
+acknowledges, and the env waits for `ack_seq == reset_seq`, `state == 3` and
+stable `fight_on == 1` frames. Commands: increment `cmd_seq`, write
+`cmd`/args, wait for `cmd_ack == cmd_seq`; `ack_frame` says when it ran.
+`state_hash`/`game_frame` are written every presented frame and only valid
+when `flags & 64`; they are the basis for verifying `SSBU_SPEED` runs.
+`set_pad` is used only with `SSBU_PAD_FROM_CTL=1` (the synthetic XInput pad on
+slot 0 is then driven by the block instead of the sequence).
+
+## Runtime switches that matter for training
+
+- `SSBU_RL=1` — maps the control block (reset + v2 status/commands). Required
+  for R2, `state_hash`, `game_frame` and `set_pad`.
+- `SSBU_INPUT_NO_FOCUS=1` — pads and keyboard stay live without the game
+  window having SDL keyboard focus.
+- `SSBU_SPEED=<n>` — run the game at n × 60 Hz, one game step per presented
+  frame; `0` = uncapped. The presented frame (`game_frame`) and `state_hash`
+  in the control block let a run verify turbo correctness.
+- `SSBU_FIXED_SEED=<n>` — constant clock reads / fixed RNG source; required
+  for reproducible turbo comparisons.
+- `SSBU_PAD_FROM_CTL=1` — synthetic XInput pad on player 1 driven by the v2
+  `set_pad` command (no uinput, no window focus).
+- `SSBU_DEBUG_MATCH=...,items=off,stock=N` — the `stock=N` override now writes
+  the stock rule and both fighter records at match setup/ready-go; `items=off`
+  writes `item appear 0`. No menu edit is needed.
+- `SSBU_SEQ`/`SSBU_XINPUT_SYNTH` — focus-free scripted sequence (unchanged).
 
 ## Extra block: `/dev/shm/ssbu_extra.bin`
 
