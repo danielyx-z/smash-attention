@@ -180,6 +180,98 @@ class WindowAlignmentTest(unittest.TestCase):
                 np.testing.assert_array_equal(a, b)
 
 
+class EgoSwapTest(unittest.TestCase):
+    def setUp(self):
+        obs, acts = make_obs_actions(24, seed=9)
+        self.ep = episode_from_obs_actions(obs, acts, index=3)
+        # give the two players clearly different actions
+        self.ep.buttons_raw[:, 1] = np.bitwise_xor(self.ep.buttons_raw[:, 0], 0x5)
+        self.ep.stick[:, 1] = -self.ep.stick[:, 0]
+        self.ep = bc.EpisodeData(self.ep.index, self.ep.path, self.ep.meta,
+                                 self.ep.raw, self.ep.buttons_raw,
+                                 self.ep.stick, self.ep.cstick, self.ep.trigger,
+                                 player=0, obs=self.ep.obs)
+
+    def test_blocks_swap_and_actions_follow(self):
+        sw = bc.ego_swap_episode(self.ep)
+        n = bc.OBS_PER_FIGHTER
+        np.testing.assert_allclose(sw.obs[:, :n], self.ep.obs[:, n:])
+        np.testing.assert_allclose(sw.obs[:, n:], self.ep.obs[:, :n])
+        other = self.ep.with_player(1)
+        np.testing.assert_allclose(sw.acts["buttons"], other.acts["buttons"])
+        np.testing.assert_allclose(sw.acts["stick"], self.ep.stick[:, 1])
+        np.testing.assert_allclose(sw.acts["cstick"], self.ep.cstick[:, 1])
+        self.assertEqual(sw.player, 1)
+
+    def test_swap_is_an_involution(self):
+        twice = bc.ego_swap_episode(bc.ego_swap_episode(self.ep))
+        np.testing.assert_allclose(twice.obs, self.ep.obs)
+        np.testing.assert_allclose(twice.acts["buttons"], self.ep.acts["buttons"])
+
+    def test_samples_double(self):
+        cfg = bc.BCConfig(window=4, horizon=2)
+        base = bc.samples_for([self.ep], cfg, mirror=False)
+        swapped = bc.samples_for([self.ep], cfg, mirror=False, ego_swap=True)
+        self.assertEqual(tmp_len(swapped), 2 * tmp_len(base))
+
+    def test_composes_with_mirror(self):
+        cfg = bc.BCConfig(window=4, horizon=2)
+        one = bc.samples_for([self.ep], cfg, mirror=False, ego_swap=True)
+        two = bc.samples_for([self.ep], cfg, mirror=True, ego_swap=True)
+        self.assertEqual(tmp_len(two), 2 * tmp_len(one))
+
+
+def tmp_len(samples) -> int:
+    return int(samples["windows"].shape[0])
+
+
+class DecisionMetricTest(unittest.TestCase):
+    def setUp(self):
+        # hold-heavy actions: one change every 6 decisions
+        n = 60
+        buttons = np.zeros((n, bc.N_BUTTONS), np.float32)
+        stick = np.zeros((n, 2), np.float32)
+        for i in range(n):
+            if (i // 6) % 2 == 1:
+                buttons[i, 0] = 1.0            # A held for 6 decisions
+            if (i // 12) % 2 == 1:
+                stick[i, 0] = 1.0 if (i // 12) % 4 == 1 else -1.0
+        acts = {"buttons": buttons, "stick": stick,
+                "cstick": np.zeros((n, 2), np.float32),
+                "trigger": np.zeros(n, np.float32)}
+        obs = np.zeros((n, bc.OBS_DIM), np.float32)
+        obs[:, 0] = np.arange(n, dtype=np.float32)
+        self.ep = episode_from_obs_actions(obs, acts, index=0)
+        self.cfg = bc.BCConfig(window=4, horizon=2)
+        self.samples = bc.samples_for([self.ep], self.cfg)
+
+    def test_transition_mask_matches_manual(self):
+        mask = bc.transition_mask(self.samples)
+        prev = self.samples["prev"]
+        tb = self.samples["targets"]["buttons"][:, 0]
+        pbtn = prev[:, :12] >= 0.5
+        pstick = bc.stick_to_bin(prev[:, 12:14])
+        tb_bins = self.samples["targets"]["stick"][:, 0]
+        manual = (tb != pbtn).any(axis=1) | (tb_bins != pstick)
+        np.testing.assert_array_equal(mask, manual)
+        self.assertGreater(int(mask.sum()), 0)
+        self.assertLess(int(mask.sum()), len(mask))
+        self.assertLess(float(mask.mean()), 0.5)   # hold-dominated
+
+    def test_change_metrics_present(self):
+        target = bc.first_actions(self.samples)
+        pred = bc.copy_last_pred(self.samples)
+        m = bc.compute_metrics(pred, target, prev=self.samples["prev"])
+        for key in ("change_frames", "change_rate", "change_mean_f1",
+                    "change_mean_f1_active", "change_per_button_f1"):
+            self.assertIn(key, m)
+        self.assertGreater(m["change_frames"], 0)
+        self.assertTrue(0.0 <= m["change_mean_f1"] <= 1.0)
+        b = bc.copy_last_metrics(self.samples)
+        self.assertIn("mean_f1", b)
+        self.assertIn("change_mean_f1", b)
+
+
 class MirrorTest(unittest.TestCase):
     def setUp(self):
         obs, acts = make_obs_actions(20, seed=5)

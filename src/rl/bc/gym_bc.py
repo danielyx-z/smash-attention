@@ -59,7 +59,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -554,6 +554,30 @@ def concat_samples(parts: list[dict]) -> dict:
     }
 
 
+def ego_swap_obs(obs: np.ndarray) -> np.ndarray:
+    """Swap the two fighter blocks (the other player becomes the ego).
+
+    ``dx``/``dy``/``distance``/``facing_rel`` are per-fighter (each block is
+    relative to its own opponent), so a block swap is complete: no field needs
+    a sign change.  The action target must come from the other player, which
+    :func:`ego_swap_episode` does.
+    """
+    o = np.array(obs, copy=True)
+    o[..., :OBS_PER_FIGHTER] = np.asarray(obs)[..., OBS_PER_FIGHTER:]
+    o[..., OBS_PER_FIGHTER:] = np.asarray(obs)[..., :OBS_PER_FIGHTER]
+    return o
+
+
+def ego_swap_episode(ep: EpisodeData) -> EpisodeData:
+    """Same episode seen from the opponent's seat: blocks swapped, actions from
+    the other player.  Doubles the data of a two-player recording; on a mirror
+    match (X vs X) it is the same behaviour, so it is free."""
+    return EpisodeData(ep.index, ep.path, ep.meta, ep.raw, ep.buttons_raw,
+                       ep.stick, ep.cstick, ep.trigger, player=1 - ep.player,
+                       shield_from_status=ep.shield_from_status,
+                       obs=ego_swap_obs(ep.obs), acts=None)
+
+
 def mirror_episode(ep: EpisodeData) -> EpisodeData:
     return EpisodeData(ep.index, ep.path, ep.meta, ep.raw, ep.buttons_raw,
                        ep.stick, ep.cstick, ep.trigger, player=ep.player,
@@ -563,15 +587,19 @@ def mirror_episode(ep: EpisodeData) -> EpisodeData:
 
 
 def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
-                mirror: bool = False) -> dict:
+                mirror: bool = False, ego_swap: bool = False) -> dict:
     parts = []
     for ep in episodes:
-        parts.append(window_samples(ep.obs, ep.acts, cfg.window, cfg.horizon,
-                                    cfg.cstick, cfg.trigger))
-        if mirror:
-            mep = mirror_episode(ep)
-            parts.append(window_samples(mep.obs, mep.acts, cfg.window,
-                                        cfg.horizon, cfg.cstick, cfg.trigger))
+        variants = [ep]
+        if ego_swap:
+            variants.append(ego_swap_episode(ep))
+        for v in variants:
+            parts.append(window_samples(v.obs, v.acts, cfg.window, cfg.horizon,
+                                        cfg.cstick, cfg.trigger))
+            if mirror:
+                mv = mirror_episode(v)
+                parts.append(window_samples(mv.obs, mv.acts, cfg.window,
+                                            cfg.horizon, cfg.cstick, cfg.trigger))
     return concat_samples(parts)
 
 
@@ -688,6 +716,8 @@ class BCConfig:
     cstick: bool = False
     trigger: bool = True
     player: int = 0
+    ego_swap: bool = False
+    transition_weight: float = 1.0
     obs_normalize: bool = False
     dropout: float = 0.0
     # CPU recordings put a spurious X (0x4) in the guard mask 0x8004; relabel
@@ -994,7 +1024,8 @@ def _f1(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def compute_metrics(pred: dict, target: dict,
-                    thresholds: np.ndarray | None = None) -> dict:
+                    thresholds: np.ndarray | None = None,
+                    prev: np.ndarray | None = None) -> dict:
     """Per-button F1, stick accuracy, and action-rate divergence."""
     bp = np.asarray(pred["buttons"], np.float32)
     tb = np.asarray(target["buttons"], np.float32)
@@ -1047,6 +1078,28 @@ def compute_metrics(pred: dict, target: dict,
         "stick_mae": stick_mae,
         "thresholds": [float(v) for v in th],
     }
+    if prev is not None:
+        # Decision points: target differs from the previous action.  This is the
+        # 16.5 % of samples where the behaviour actually changes; the rest is
+        # "hold", which a copy-last model gets for free.
+        pv = np.asarray(prev, np.float32)
+        pbtn = pv[:, :12] >= 0.5
+        pstick = stick_to_bin(pv[:, 12:14])
+        tstick = np.asarray(target["stick"], np.int64)
+        if tstick.ndim == 2:
+            tstick = tstick[:, 0]
+        change = (tb != pbtn).any(axis=1) | (tstick != pstick)
+        nch = int(change.sum())
+        f1_ch = {name: _f1(pred_bin[change, i], tb[change, i])
+                 for i, name in enumerate(BUTTONS)} if nch else {n: 1.0 for n in BUTTONS}
+        active_ch = [name for name in BUTTONS
+                     if nch and tb[change, BUTTON_INDEX[name]].mean() > 0]
+        out["change_frames"] = nch
+        out["change_rate"] = float(nch / max(1, len(tb)))
+        out["change_per_button_f1"] = f1_ch
+        out["change_mean_f1"] = float(np.mean(list(f1_ch.values()))) if nch else 1.0
+        out["change_mean_f1_active"] = float(np.mean([f1_ch[n] for n in active_ch])) \
+            if active_ch else 1.0
     if "cstick_bin" in target and "cstick_bin" in pred:
         cp = np.asarray(pred["cstick_bin"], np.int64)
         ct = np.asarray(target["cstick_bin"], np.int64)
@@ -1128,6 +1181,36 @@ def collect_predictions(model: BCPolicyNet, samples: dict, mean, std,
     return pred
 
 
+def copy_last_pred(samples: dict) -> dict:
+    """The trivial policy: repeat the previous action (no learning at all)."""
+    prev = np.asarray(samples["prev"], np.float32)
+    stick = prev[:, 12:14]
+    return {
+        "buttons": prev[:, :12],
+        "stick": stick,
+        "stick_bin": stick_to_bin(stick),
+    }
+
+
+def copy_last_metrics(samples: dict) -> dict:
+    """Metrics of the copy-last policy on the same samples (baseline)."""
+    target = first_actions(samples)
+    # binary inputs: no calibration, a 0.5 threshold is exact
+    return compute_metrics(copy_last_pred(samples), target,
+                           thresholds=np.full(N_BUTTONS, 0.5, np.float32),
+                           prev=samples["prev"])
+
+
+def transition_mask(samples: dict) -> np.ndarray:
+    """True where the target action differs from the previous one."""
+    prev = np.asarray(samples["prev"], np.float32)
+    tb = samples["targets"]["buttons"][:, 0]
+    pbtn = prev[:, :12] >= 0.5
+    pstick = stick_to_bin(prev[:, 12:14])
+    tstick = samples["targets"]["stick"][:, 0]
+    return (tb != pbtn).any(axis=1) | (tstick != pstick)
+
+
 def first_actions(samples: dict) -> dict:
     t = samples["targets"]
     return {
@@ -1155,6 +1238,7 @@ def _apply_threads(threads: int, batch: int) -> int:
 def train(data_dir: str, out: str, cfg: BCConfig | None = None,
           epochs: int = 10, batch: int = 64, lr: float = 1e-3,
           device: str = "cpu", seed: int = 0, mirror: bool = True,
+          ego_swap: bool = False, select: str = "loss",
           limit: int | None = None, threads: int = 0,
           weight_decay: float = 1e-4, dropout: float | None = None,
           patience: int = 5, min_epochs: int = 1,
@@ -1168,7 +1252,8 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
     old = _apply_threads(threads, batch)
     try:
         return _train(data_dir, out, cfg=cfg, epochs=epochs, batch=batch, lr=lr,
-                      device=device, seed=seed, mirror=mirror, limit=limit,
+                      device=device, seed=seed, mirror=mirror,
+                      ego_swap=ego_swap, select=select, limit=limit,
                       weight_decay=weight_decay, dropout=dropout,
                       patience=patience, min_epochs=min_epochs, log=log)
     finally:
@@ -1178,6 +1263,7 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
 def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
            epochs: int = 10, batch: int = 64, lr: float = 1e-3,
            device: str = "cpu", seed: int = 0, mirror: bool = True,
+           ego_swap: bool = False, select: str = "loss",
            limit: int | None = None, weight_decay: float = 1e-4,
            dropout: float | None = None, patience: int = 5,
            min_epochs: int = 1,
@@ -1235,7 +1321,8 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         log(f"[bc] shield-from-status OFF: {shield_labels['total']['frames']} "
             "guard decisions keep their raw mask")
 
-    train_samples = samples_for(train_eps, cfg, mirror=mirror)
+    train_samples = samples_for(train_eps, cfg, mirror=mirror,
+                                ego_swap=ego_swap)
     val_samples = samples_for(val_eps, cfg, mirror=False)
     test_samples = samples_for(test_eps, cfg, mirror=False)
     log(f"[bc] samples: train {len(train_samples['windows'])}, "
@@ -1243,8 +1330,18 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
 
     mean, std = norm_stats(train_samples["windows"])
     ds = WindowDataset(train_samples, mean, std)
-    loader = DataLoader(ds, batch_size=batch, shuffle=True, num_workers=0,
-                        drop_last=False)
+    if cfg.transition_weight and float(cfg.transition_weight) != 1.0:
+        mask = transition_mask(train_samples)
+        w = np.where(mask, float(cfg.transition_weight), 1.0)
+        sampler = WeightedRandomSampler(torch.as_tensor(w, dtype=torch.double),
+                                        num_samples=len(w), replacement=True)
+        loader = DataLoader(ds, batch_size=batch, sampler=sampler, num_workers=0,
+                            drop_last=False)
+        log(f"[bc] transition weighting x{cfg.transition_weight:.2f}: "
+            f"{int(mask.sum())}/{len(mask)} samples are decision points")
+    else:
+        loader = DataLoader(ds, batch_size=batch, shuffle=True, num_workers=0,
+                            drop_last=False)
     pos_weight = torch.as_tensor(
         compute_pos_weight(train_samples["targets"]["buttons"]),
         dtype=torch.float32, device=device)
@@ -1253,7 +1350,10 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
                             weight_decay=float(weight_decay))
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
 
+    if select not in ("loss", "f1_active", "f1_change"):
+        raise ValueError(f"select must be loss/f1_active/f1_change, got {select!r}")
     best_val = float("inf")
+    best_score = float("-inf")
     best_epoch = 0
     best_state = copy.deepcopy(model.state_dict())
     bad_epochs = 0
@@ -1281,8 +1381,16 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         train_loss = total / max(1, seen)
         val_loss = _eval_loss(model, val_samples, mean, std, pos_weight,
                               cfg, device, batch)
-        improved = val_loss < best_val
+        vpred = collect_predictions(model, val_samples, mean, std, device, batch)
+        vmet = compute_metrics(vpred, first_actions(val_samples), None,
+                               prev=val_samples["prev"])
+        f1_act = float(vmet["mean_f1_active"])
+        f1_chg = float(vmet.get("change_mean_f1_active", 0.0))
+        score = {"loss": -val_loss, "f1_active": f1_act,
+                 "f1_change": f1_chg}[select]
+        improved = score > best_score
         if improved:
+            best_score = score
             best_val = val_loss
             best_epoch = epoch
             best_state = copy.deepcopy(model.state_dict())
@@ -1290,12 +1398,14 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         else:
             bad_epochs += 1
         history.append({"epoch": epoch, "train_loss": train_loss,
-                        "val_loss": val_loss, "best": bool(improved),
+                        "val_loss": val_loss, "val_f1_active": f1_act,
+                        "val_f1_change": f1_chg, "best": bool(improved),
                         "bad_epochs": bad_epochs})
         if epoch == 1 or epoch % max(1, epochs // 10) == 0 or epoch == epochs \
                 or improved:
             log(f"[bc] epoch {epoch:3d}/{epochs}: train {train_loss:.4f} "
-                f"val {val_loss:.4f}"
+                f"val {val_loss:.4f}  f1_active {f1_act:.3f}  "
+                f"f1_change {f1_chg:.3f}"
                 + (" *" if improved else ""))
         if patience > 0 and epoch >= max(1, min_epochs) \
                 and bad_epochs >= patience:
@@ -1319,11 +1429,17 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     metrics = {
         "train": compute_metrics(
             collect_predictions(model, train_samples, mean, std, device, batch),
-            first_actions(train_samples), thresholds),
-        "val": compute_metrics(val_pred, first_actions(val_samples), thresholds),
+            first_actions(train_samples), thresholds, prev=train_samples["prev"]),
+        "val": compute_metrics(val_pred, first_actions(val_samples), thresholds,
+                               prev=val_samples["prev"]),
         "test": compute_metrics(
             collect_predictions(model, test_samples, mean, std, device, batch),
-            first_actions(test_samples), thresholds),
+            first_actions(test_samples), thresholds, prev=test_samples["prev"]),
+        "baseline": {
+            "train": copy_last_metrics(train_samples),
+            "val": copy_last_metrics(val_samples),
+            "test": copy_last_metrics(test_samples),
+        },
         "history": history,
         "expert_stats": dataset_action_stats(train_samples),
         "split": {"train": [int(i) for i in tr_idx],
@@ -1337,8 +1453,10 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         "pos_weight": pos_weight.cpu().numpy().tolist(),
         # The train/val/test metrics above are all computed with the restored
         # best-validation weights.
+        "select": select,
         "best_epoch": int(best_epoch),
         "best_val_loss": float(best_val),
+        "best_score": float(best_score),
         "epochs_run": int(epochs_run),
         "stopped_early": bool(stopped_early),
         "patience": int(patience),
@@ -1377,6 +1495,9 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
             "data": os.path.abspath(data_dir),
             "player": cfg.player,
             "mirror": bool(mirror),
+            "ego_swap": bool(ego_swap),
+            "transition_weight": float(cfg.transition_weight),
+            "select": select,
             "trained_ns": time.time_ns(),
             "torch": torch.__version__,
             "numpy": np.__version__,
@@ -1544,6 +1665,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="keep the raw CPU mask on GUARD frames (default: "
                          "relabel them ZL=1/X=0 from the status kind)")
     ap.add_argument("--no-mirror", action="store_true")
+    ap.add_argument("--ego-swap", action="store_true",
+                    help="also train from the opponent's seat (blocks swapped, "
+                         "actions from the other player): 2x more data")
+    ap.add_argument("--transition-weight", type=float, default=1.0,
+                    help="sampling weight for decisions that differ from the "
+                         "previous action (1.0 = off)")
+    ap.add_argument("--select-metric", choices=("loss", "f1_active", "f1_change"),
+                    default="loss",
+                    help="model selection / early stopping metric on validation "
+                         "(loss, active-button F1, or change-point F1)")
     ap.add_argument("--patience", type=int, default=5,
                     help="early-stop after N epochs without val improvement "
                          "(0 disables)")
@@ -1563,6 +1694,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = BCConfig(window=args.window, horizon=args.horizon,
                    frame_skip=args.frame_skip, hidden=args.hidden,
                    cstick=args.cstick, player=args.player,
+                   ego_swap=bool(args.ego_swap),
+                   transition_weight=float(args.transition_weight),
                    obs_normalize=args.obs_normalize, dropout=args.dropout,
                    shield_from_status=not args.no_shield_from_status)
     # Progress goes to stderr so `--json` stays machine-readable on stdout.
@@ -1591,6 +1724,8 @@ def main(argv: list[str] | None = None) -> int:
     ckpt, metrics = train(args.data, args.out, cfg=cfg, epochs=args.epochs,
                           batch=args.batch, lr=args.lr, device=args.device,
                           seed=args.seed, mirror=not args.no_mirror,
+                          ego_swap=bool(args.ego_swap),
+                          select=args.select_metric,
                           limit=args.limit_episodes, threads=args.threads,
                           weight_decay=args.weight_decay,
                           dropout=args.dropout, patience=args.patience,
@@ -1612,6 +1747,8 @@ def main(argv: list[str] | None = None) -> int:
         "train": metrics["train"],
         "val": metrics["val"],
         "test": metrics["test"],
+        "baseline": metrics["baseline"],
+        "select": metrics["select"],
         "expert_stats": metrics["expert_stats"],
         "split": metrics["split"],
         "alignment": metrics["alignment"],
