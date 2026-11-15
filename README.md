@@ -7,8 +7,8 @@
 > project; the runtime switches everything here depends on (`SSBU_RL`,
 > `SSBU_DEBUG_MATCH`, `SSBU_SPEED`, the pads) live in its
 > `runtime/debug_mode.c`, `runtime/nnhid.c` and `runtime/nntime.c` and are **not
-> vendored here**. `patches/ssbu-recomp-rl.patch` is a snapshot of the first
-> runtime change (2026-11-03), kept for reference.
+> vendored here**. That tree is the source of truth for the runtime side; there
+> is no patch to apply here.
 >
 > ```
 > src/rl/env/        state → gym observation/action, SSBUGymEnv
@@ -38,21 +38,12 @@
 >
 ## Upstream runtime change
 
-The only runtime file this toolkit requires is `runtime/debug_mode.c`. Apply
-the patch in a checkout of `ssbu-recomp`:
-
-```bash
-git -C /path/to/ssbu-recomp apply /path/to/ssbu-rl/patches/ssbu-recomp-rl.patch
-```
-
-It is off by default and activates only with `SSBU_RL=1`. It adds:
-
-* the R2 direct-reset control block (`/dev/shm/ssbu_control.bin`, `SSBC` v1);
-* `SSBU_DEBUG_MATCH` forcing for `p1=cpu|human`, `p2=...`, `players=N`,
-  `cpu=N`, `stage=end`, and the fighter/stage selection used by the recorder.
-
-No other runtime file is needed. The other local modifications in the
-`ssbu-recomp` working tree are unrelated to this repository.
+The runtime side lives in the `ssbu-recomp` checkout (`runtime/debug_mode.c`,
+`runtime/nnhid.c`, `runtime/nntime.c`, `runtime/hostrt.h`). It is off by default
+and activates only with `SSBU_RL=1`, which gives the control block
+(`/dev/shm/ssbu_control.bin`, `SSBC` v2: reset, `state_hash`, `game_frame`,
+turbo status, pad/seed commands) and `SSBU_DEBUG_MATCH` forcing for
+`p1=cpu|human`, `p2=...`, `players=N`, `cpu=N`, `stage=end` and the rules.
 
 ---
 
