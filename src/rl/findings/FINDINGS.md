@@ -1623,8 +1623,7 @@ leaves.
 ### Conservative return weighting (damage differential) beats plain BC closed loop
 
 Reward: `0.01 * (damage dealt - damage taken)` per decision, the offline twin of
-`gym_reward.compute_reward` with the stock/KO/win terms off (255-stock
-recordings never KO, and damage already encodes progress towards a stock).
+`gym_reward.compute_reward` with the stock/KO/win terms off.
 Weight: `clip(exp(4 * (G - median G)), 0.1, 10)`, mean-normalised, `G` the
 discounted (gamma 0.995) return to the end of the episode; measured distribution
 mean 1.000, p10 0.385, p90 1.804, max 6.836.
@@ -1646,3 +1645,25 @@ stick MAE 0.076).
 Caveats: 3 episodes each, and episode-to-episode variance is large (one plain
 episode took 149 %), so this is a direction, not a measurement. The two models
 also saw different data volumes.
+
+### Damage resets on a KO: what the reward does and does not count
+
+Measured over 30 episodes of `data/il/dk9` (255-stock rule):
+
+* **every** episode has at least one stock loss: 72 in total in 30 episodes (~2.4
+  per episode), so KOs are common, not absent — the earlier "255 stocks means no
+  KOs" note in this file was wrong.  The `stock` field reads 1..9 (a display
+  counter), which is why it never looked like 255; the reliable death signal is
+  the damage trace dropping to 0 (54 drops for P1, 48 for P2 in the same 30
+  episodes).
+* the damage delta is clamped at 0 (`max(0, curr - prev)`), so the reset after a
+  KO contributes **0, not negative reward**: the policy is never paid for
+  "healing" the opponent.
+* the reward on the decision where a stock changes is exactly 0.000 in all 72
+  cases: the damage that led to the KO was already paid out decision by
+  decision, and the KO itself carries no bonus and dying carries no penalty.
+
+That is consistent ("damage is the currency"), but it is a modelling choice worth
+stating: a KO is worth no more than the damage that preceded it, and losing a
+stock costs nothing beyond the damage taken.  `gym_reward.RewardConfig` already
+has `ko_bonus` / `stock_loss` for the alternative; the trainer passes 0 for both.
