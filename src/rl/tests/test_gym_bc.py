@@ -856,8 +856,8 @@ class MenuWalkTest(unittest.TestCase):
         self.assertEqual(pad.calls, [])          # nothing to do: already fighting
 
     def test_walks_the_macro_when_the_game_is_in_the_menus(self):
-        # the fight comes on after the whole macro: the roster flick must run
-        pad, env = FakePad(), FakeEnv(fights_after=12)
+        # the fight comes on right after the whole macro: the roster flick runs
+        pad, env = FakePad(), FakeEnv(fights_after=11)
         with mock.patch.object(ge.time, "sleep"):
             self.assertTrue(ge.drive_menus(env, pad, 5.0, log=lambda *a: None))
         keys = [c[1] for c in pad.calls if c[0] == "press"]
@@ -868,6 +868,15 @@ class MenuWalkTest(unittest.TestCase):
         self.assertLessEqual(len(keys), sum(
             1 for step in ge.MENU_MACRO
             if step[0] not in ("up", "down", "left", "right")) + 2)
+
+    def test_repeats_the_macro_when_a_pass_misses_the_fight(self):
+        # a boot slower than the first pass: the second pass has to repeat the flicks
+        pad, env = FakePad(), FakeEnv(fights_after=20)
+        logs = []
+        with mock.patch.object(ge.time, "sleep"):
+            self.assertTrue(ge.drive_menus(env, pad, 60.0, log=logs.append))
+        self.assertGreater(sum(1 for c in pad.calls if c == ("stick", (0.0, 1.0))), 1)
+        self.assertTrue(any("retrying" in line for line in logs))
 
     def test_gives_up_without_a_fight(self):
         pad, env = FakePad(), FakeEnv(fights_after=None)

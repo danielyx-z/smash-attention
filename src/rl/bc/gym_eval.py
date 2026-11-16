@@ -267,20 +267,20 @@ def drive_menus(env, pad, timeout: float = 120.0, log=print) -> bool:
         time.sleep(0.25)
     log("[eval] menu walk: state block is live, pressing A through the menus")
     t0 = time.monotonic()
-    for keys, hold, wait in MENU_MACRO:
-        if _fight_on(env):
-            log("[eval] menu walk: the fight is on")
-            return True
-        _pad_step(pad, keys, hold)
-        time.sleep(wait)
+    cycle = 0
     while time.monotonic() - t0 < timeout:
-        if _fight_on(env):
-            log(f"[eval] menu walk: the fight is on after {time.monotonic() - t0:.0f}s")
-            return True
-        _pad_step(pad, "A", 0.1)               # harmless on the remaining screens
-        time.sleep(1.0)
-    log("[eval] menu walk: no fight after the macro and "
-        f"{timeout:.0f}s of retries")
+        cycle += 1
+        # The macro is repeated, not just its A presses: boot time varies, so a
+        # first pass can finish before the character select is up, and the
+        # roster needs the stick flick before A does anything useful.
+        for keys, hold, wait in MENU_MACRO:
+            if _fight_on(env):
+                log(f"[eval] menu walk: the fight is on after {time.monotonic() - t0:.0f}s")
+                return True
+            _pad_step(pad, keys, hold)
+            time.sleep(wait)
+        log(f"[eval] menu walk: pass {cycle} did not reach the fight, retrying")
+    log(f"[eval] menu walk: no fight after {timeout:.0f}s")
     return _fight_on(env)
 
 
