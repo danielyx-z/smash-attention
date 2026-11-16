@@ -812,6 +812,70 @@ class EvalInfoTest(unittest.TestCase):
         self.assertIsNone(r["winner"])
 
 
+class FakeSnapshot:
+    def __init__(self, fight_on: bool):
+        self.fight_on = fight_on
+
+
+class FakePad:
+    def __init__(self):
+        self.calls = []
+
+    def press(self, key):
+        self.calls.append(("press", key))
+
+    def release_all(self):
+        self.calls.append(("release", None))
+
+    def set_stick(self, x, y):
+        self.calls.append(("stick", (x, y)))
+
+
+class FakeEnv:
+    """Just enough of SSBUGymEnv for the menu walk: a reader."""
+
+    def __init__(self, fights_after: int | None):
+        self.reads = 0
+        self.fights_after = fights_after
+        self.reader = self
+
+    def read_latest(self, timeout=None):
+        self.reads += 1
+        if self.fights_after is None:
+            return FakeSnapshot(False)
+        return FakeSnapshot(self.reads > self.fights_after)
+
+
+class MenuWalkTest(unittest.TestCase):
+    """--start-menus: boot -> fight with the pad, no presses once it is fighting."""
+
+    def test_stops_as_soon_as_the_fight_is_on(self):
+        pad, env = FakePad(), FakeEnv(fights_after=0)
+        with mock.patch.object(ge.time, "sleep"):
+            self.assertTrue(ge.drive_menus(env, pad, 5.0, log=lambda *a: None))
+        self.assertEqual(pad.calls, [])          # nothing to do: already fighting
+
+    def test_walks_the_macro_when_the_game_is_in_the_menus(self):
+        # the fight comes on after the whole macro: the roster flick must run
+        pad, env = FakePad(), FakeEnv(fights_after=12)
+        with mock.patch.object(ge.time, "sleep"):
+            self.assertTrue(ge.drive_menus(env, pad, 5.0, log=lambda *a: None))
+        keys = [c[1] for c in pad.calls if c[0] == "press"]
+        self.assertIn("A", keys)
+        sticks = [c[1] for c in pad.calls if c[0] == "stick"]
+        self.assertIn((0.0, 1.0), sticks)        # up into the roster
+        # the walk stops with the macro (at most one retry press after it)
+        self.assertLessEqual(len(keys), sum(
+            1 for step in ge.MENU_MACRO
+            if step[0] not in ("up", "down", "left", "right")) + 2)
+
+    def test_gives_up_without_a_fight(self):
+        pad, env = FakePad(), FakeEnv(fights_after=None)
+        with mock.patch.object(ge.time, "sleep"), \
+                mock.patch.object(ge.time, "monotonic", side_effect=[0, 0, 1e9]):
+            self.assertFalse(ge.drive_menus(env, pad, 5.0, log=lambda *a: None))
+
+
 # ---------------------------------------------------------------------------
 # recorder
 # ---------------------------------------------------------------------------

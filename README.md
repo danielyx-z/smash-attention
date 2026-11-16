@@ -550,13 +550,10 @@ live findings in `FINDINGS.md` and `extra_map.json`.
   --data tools/mem/test_artifacts/accept/mario_vs_dk_1v1_30 \
   --epochs 30 --patience 5 --cstick --out data/accept/bc.pt --json
 
-# live closed-loop eval (P1 human/agent, P2 DK CPU; focus is required for pads)
-.venv/bin/python tools/mem/game_session.py run --owner ev \
-  --restart-game --restart-reader --keep-game \
-  --match 'p1=mario,p1=human,p2=donkey,p2=cpu,cpu=9,stage=end,players=2' \
-  -- bash -lc 'tools/mem/focus_game.sh; .venv/bin/python tools/mem/wait_live.py; \
-     .venv/bin/python tools/mem/gym_eval.py --model data/accept/bc.pt \
-       --episodes 1 --max-steps 150 --json'
+# live closed-loop eval: boots the game, the policy pad walks the menus and
+# plays P1, P2 is DK CPU 9.  One command, no key presses, no focus keeper.
+src/rl/scripts/live_eval.sh --model data/models/bc_dk9_dir200.pt --episodes 5
+# --attach reuses the running game; --max-steps / --json go to gym_eval.
 ```
 
 ### Important v1 caveats

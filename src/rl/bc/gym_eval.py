@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -177,7 +178,7 @@ def _action_dict(action) -> dict:
 # real environment adapter
 # ---------------------------------------------------------------------------
 def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
-             mock: bool, log=print):
+             mock: bool, log=print, input_adapter=None):
     if not mock:
         try:
             from rl.env.gym_env import SSBUGymEnv  # type: ignore
@@ -190,6 +191,8 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
         # constructors that lack some of these keywords.
         kwargs = {"normalize_obs": cfg.obs_normalize,
                   "frame_skip": cfg.frame_skip, "max_steps": max_steps}
+        if input_adapter is not None:
+            kwargs["input_adapter"] = input_adapter
         try:
             env = SSBUGymEnv(**kwargs)
         except TypeError:
@@ -207,6 +210,92 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
             f"normalize_obs={cfg.obs_normalize} max_steps={max_steps}")
         return env, False
     return MockEnv(max_steps=max_steps, seed=seed), True
+
+
+#: Boot -> fight with a pad, one step per screen.  Every screen of the Smash
+#: menu advances on A; the only exception is the character select, where the
+#: hand has to travel from the player panel up into the roster (a stick flick)
+#: before A picks; A on the "READY TO FIGHT" banner starts the match.  This is
+#: what a person does with a controller, only from code.
+MENU_MACRO: tuple[tuple[str, float, float], ...] = (
+    ("A", 0.10, 0.9),          # "PRESS ANY BUTTON" -> main menu
+    ("A", 0.10, 0.9),          # Smash tile -> Smash submenu
+    ("A", 0.10, 0.9),          # regular Smash -> rules
+    ("A", 0.10, 0.9),          # rules -> stage select
+    ("A", 0.10, 1.6),          # stage -> loading, then character select
+    ("A", 0.10, 1.6),          # character select: open the roster
+    ("up", 0.50, 0.4),         # hand up into the roster
+    ("right", 0.30, 0.4),      # onto Donkey Kong
+    ("A", 0.10, 0.9),          # pick -> "READY TO FIGHT"
+    ("A", 0.10, 2.0),          # start the match
+)
+
+
+def _state_ready(env) -> bool:
+    """True when the reader has published at least one state frame."""
+    reader = getattr(env, "reader", None)
+    if reader is None:
+        return True
+    try:
+        reader.read_latest(timeout=1.0)
+        return True
+    except Exception:
+        return False
+
+
+def _fight_on(env) -> bool:
+    reader = getattr(env, "reader", None)
+    if reader is None:
+        return False
+    try:
+        return bool(reader.read_latest(timeout=1.0).fight_on)
+    except Exception:
+        return False
+
+
+def drive_menus(env, pad, timeout: float = 120.0, log=print) -> bool:
+    """Walk boot -> match with ``pad``; True once the fight is on.
+
+    The pad must be the one the policy will use: it joins player 1, and a human
+    slot left without its controller is dropped back to the title by the game.
+    """
+    deadline = time.monotonic() + max(60.0, timeout)
+    while not _state_ready(env):                 # the game may still be loading
+        if time.monotonic() > deadline:
+            log("[eval] menu walk: the state block never appeared")
+            return False
+        time.sleep(0.25)
+    log("[eval] menu walk: state block is live, pressing A through the menus")
+    t0 = time.monotonic()
+    for keys, hold, wait in MENU_MACRO:
+        if _fight_on(env):
+            log("[eval] menu walk: the fight is on")
+            return True
+        _pad_step(pad, keys, hold)
+        time.sleep(wait)
+    while time.monotonic() - t0 < timeout:
+        if _fight_on(env):
+            log(f"[eval] menu walk: the fight is on after {time.monotonic() - t0:.0f}s")
+            return True
+        _pad_step(pad, "A", 0.1)               # harmless on the remaining screens
+        time.sleep(1.0)
+    log("[eval] menu walk: no fight after the macro and "
+        f"{timeout:.0f}s of retries")
+    return _fight_on(env)
+
+
+def _pad_step(pad, keys: str, hold: float) -> None:
+    stick = {"up": (0.0, 1.0), "down": (0.0, -1.0),
+             "left": (-1.0, 0.0), "right": (1.0, 0.0)}.get(keys)
+    if stick is not None:
+        pad.set_stick(*stick)
+        time.sleep(hold)
+        pad.release_all()
+        return
+    for key in keys.split("+"):
+        pad.press(key)
+    time.sleep(hold)
+    pad.release_all()
 
 
 def reset_env(env, seed: int):
@@ -455,6 +544,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="expert recordings for the distribution comparison")
     ap.add_argument("--max-steps", type=int, default=1800,
                     help="decision steps per episode (12 Hz; env default 1800)")
+    ap.add_argument("--start-menus", action="store_true",
+                    help="walk boot -> match with the policy pad first (the pad "
+                         "joins player 1 and drives the menus; needs the game "
+                         "started with SSBU_KEYBOARD_PLAYER=0)")
+    ap.add_argument("--menu-timeout", type=float, default=120.0,
+                    help="seconds to keep retrying the menu walk")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--execute", type=int, default=2,
@@ -483,9 +578,23 @@ def main(argv: list[str] | None = None) -> int:
             "C-stick head; using the checkpoint config")
     ensemble = bc.TemporalEnsemble(policy, execute=args.execute,
                                    blend=0.0 if args.no_blend else 0.5)
-    env, is_mock = make_env(policy.cfg, args.episodes, args.max_steps,
-                            args.seed, args.mock, log=log)
+    pad = None
+    if args.start_menus and not args.mock:
+        from rl.input.gym_input import VirtualPad
+        pad = VirtualPad().create()
+        log(f"[eval] pad up ({pad.name}); walking the menus to the match")
     try:
+        env, is_mock = make_env(policy.cfg, args.episodes, args.max_steps,
+                                args.seed, args.mock, log=log,
+                                input_adapter=pad)
+    except BaseException:
+        if pad is not None:
+            pad.destroy()
+        raise
+    try:
+        if pad is not None and not drive_menus(env, pad, args.menu_timeout, log=log):
+            log("[eval] giving up: the game is not in a fight (see the menu walk)")
+            return 2
         result = run_episodes(env, ensemble, args.episodes, args.max_steps,
                               args.seed, args.action_format, is_mock, log=log)
     except Exception as exc:
@@ -495,6 +604,8 @@ def main(argv: list[str] | None = None) -> int:
         close = getattr(env, "close", None)
         if callable(close):
             close()
+        if pad is not None:
+            pad.destroy()
 
     if args.data:
         expert = expert_stats_from_data(args.data, policy.cfg)

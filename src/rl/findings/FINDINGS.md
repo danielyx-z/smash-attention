@@ -1510,3 +1510,50 @@ episodes are exactly 5400 frames (90 s), 0 sequence gaps, ~100 s of wall time
 each including the in-fight reset (6 episodes in 10 minutes). The debug
 match's `stock=` and `time=` are re-applied at every ready-go, so the loop can
 run for as long as needed.
+
+### Live eval: who owns player 1, and starting a match from code
+
+Getting a policy into a fight used to need a person: the match has to be
+started from the Smash menus, and a pad plugged in mid-session went to the
+wrong player. Both are now code paths.
+
+**The pad goes to the first free player slot, and the keyboard holds player 1.**
+`nn::pad` logs `connected "Xbox 360 Controller" -> player 2` when a uinput pad
+appears while the keyboard owns player 1 (`nn::hid: keyboard = player 1`).
+The CSS then shows P1 idle and nothing the policy writes reaches a fighter.
+`SSBU_KEYBOARD_PLAYER=0` (`live.sh --keyboard 0`) makes it `keyboard = nobody`,
+and the pad takes player 1 — the CSS shows the "Joined!" panel before the match
+starts. This is the single cause of "P1 is not moving at all".
+
+**A human slot without its controller is dropped to the title.** With
+`p1=human` and no pad attached, the match starts (the debug harness forces the
+panel types), then after ~900 fight frames the ready-go clears and the game
+sits at "PRESS ANY BUTTON" (`fight off ... after 897 fight frames`). The pad
+must exist *before* the fight starts and stay connected for the whole episode;
+that is why the menu walk lives in the eval process, not in a helper that exits.
+
+**The menus are one A per screen.** From the title: A (main menu), A (Smash
+submenu), A (rules), A (stage select), A (stage), A (CSS roster), stick up
+(hand into the roster), stick right (onto the highlighted fighter), A (pick →
+"READY TO FIGHT"), A (start). `gym_eval --start-menus` replays that with the
+policy pad and then polls the state block until `fight_on` is 1
+(`drive_menus`, unit-tested with a fake pad). It is timing-tolerant: the macro
+runs once, then A is repeated every second until the fight is on (harmless on
+any remaining menu screen), and the walk stops the moment `fight_on` is seen.
+
+**Two more switches matter.**
+* `SSBU_INPUT_NO_FOCUS=1` keeps pads live when the game window does not have
+  the focus, so no focus keeper and no clicking (`keyboard_ours()` returns 1
+  early).
+* `SSBU_RL_MODE=1` must be set explicitly: the installed binary still defaults
+  to the old mode 2 (results-screen path), even though the source defaults to 1.
+
+One command for the whole loop:
+
+```
+src/rl/scripts/live_eval.sh --model data/models/bc_dk9_dir200.pt --episodes 5
+```
+
+It reboots the game with `SSBU_KEYBOARD_PLAYER=0`, `SSBU_INPUT_NO_FOCUS=1`,
+`SSBU_RL_MODE=1` and the eval match spec, then runs `gym_eval --start-menus`
+(policy pad = P1, P2 = DK CPU 9). `--attach` skips the reboot.
