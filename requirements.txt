@@ -1,8 +1,16 @@
-# Root .venv (CPU-only torch).  Install:
+# Root .venv.  Install:
 #   python3 -m venv .venv
 #   .venv/bin/pip install --upgrade pip
 #   .venv/bin/pip install gymnasium numpy
-#   .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu130   # GPU
+#   .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu     # CPU only
+#
+# The CUDA wheel pulls the nvidia-* runtime libs and needs a driver new enough
+# for CUDA 13 (this box: driver 580.178.04 on an RTX 3070).  Training there is
+# ~15x faster than CPU, e.g.
+#   .venv/bin/python -m rl.bc.gym_bc --data data/il/dk9 --device cuda --batch 256
+# The newest published CUDA build is 2.14.1, one minor behind the CPU-only
+# 2.15.0; anything the trainer uses works on both.
 gymnasium==1.4.0
 numpy==2.5.4
-torch==2.15.0
+torch==2.14.1

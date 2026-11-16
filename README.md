@@ -517,8 +517,9 @@ DISPLAY=:0 xdotool key z
 
 ## Gym / behaviour cloning (v1)
 
-Root venv: `.venv` (see `tools/mem/requirements.txt`; gymnasium, numpy,
-CPU-only torch). All live work is serialized by `tools/mem/game_session.py`;
+Root venv: `.venv` (see `requirements.txt`; gymnasium, numpy, torch). The
+CUDA build is what the trainer wants — `--device cuda` is ~15x faster than the
+CPU wheel on an 8-core box (the recording side is CPU-bound either way). All live work is serialized by `tools/mem/game_session.py`;
 the contracts are in `tools/mem/CONTRACTS.md`, acceptance in `ACCEPTANCE.md`,
 live findings in `FINDINGS.md` and `extra_map.json`.
 
