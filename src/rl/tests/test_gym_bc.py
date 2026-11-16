@@ -932,6 +932,8 @@ class EvalInfoTest(unittest.TestCase):
 class FakeSnapshot:
     def __init__(self, fight_on: bool):
         self.fight_on = fight_on
+        self.match_state = 0 if not fight_on else 1
+        self.fighters = [{"kind": 1}, {"kind": 1}] if fight_on else []
 
 
 class FakePad:
@@ -963,6 +965,26 @@ class FakeEnv:
         return FakeSnapshot(self.reads > self.fights_after)
 
 
+class PadJoinTest(unittest.TestCase):
+    def test_reads_the_joined_player_from_the_game_log(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+            f.write('nn::pad: connected "Xbox 360 Controller" (gamepad) -> player 2\n')
+            f.write('nn::hid: keyboard = nobody\n')
+            f.write('nn::pad: connected "Xbox 360 Controller" (gamepad) -> player 1\n')
+            path = f.name
+        try:
+            self.assertEqual(ge._last_joined_player(path), 1)
+        finally:
+            os.unlink(path)
+        self.assertIsNone(ge._last_joined_player("/nonexistent/game.log"))
+
+    def test_wait_for_pad_times_out_without_a_log(self):
+        with mock.patch.object(ge.time, "sleep"):
+            self.assertFalse(ge.wait_for_pad("/nonexistent/game.log", 0.0,
+                                             log=lambda *a: None))
+
+
 class MenuWalkTest(unittest.TestCase):
     """--start-menus: boot -> fight with the pad, no presses once it is fighting."""
 
@@ -988,7 +1010,7 @@ class MenuWalkTest(unittest.TestCase):
 
     def test_repeats_the_macro_when_a_pass_misses_the_fight(self):
         # a boot slower than the first pass: the second pass has to repeat the flicks
-        pad, env = FakePad(), FakeEnv(fights_after=20)
+        pad, env = FakePad(), FakeEnv(fights_after=26)
         logs = []
         with mock.patch.object(ge.time, "sleep"):
             self.assertTrue(ge.drive_menus(env, pad, 60.0, log=logs.append))

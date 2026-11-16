@@ -218,6 +218,7 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
 #: before A picks; A on the "READY TO FIGHT" banner starts the match.  This is
 #: what a person does with a controller, only from code.
 MENU_MACRO: tuple[tuple[str, float, float], ...] = (
+    ("B", 0.10, 0.6),          # cancel a dialog or roster left by a failed pass
     ("A", 0.10, 0.9),          # "PRESS ANY BUTTON" -> main menu
     ("A", 0.10, 0.9),          # Smash tile -> Smash submenu
     ("A", 0.10, 0.9),          # regular Smash -> rules
@@ -229,6 +230,42 @@ MENU_MACRO: tuple[tuple[str, float, float], ...] = (
     ("A", 0.10, 0.9),          # pick -> "READY TO FIGHT"
     ("A", 0.10, 2.0),          # start the match
 )
+
+
+def _last_joined_player(game_log: str) -> int | None:
+    """Player number of the last ``nn::pad: connected ... -> player N`` line."""
+    try:
+        with open(os.path.expanduser(game_log), "r", errors="ignore") as f:
+            text = f.read()
+    except OSError:
+        return None
+    player = None
+    for line in text.splitlines():
+        if "nn::pad: connected" in line and "-> player" in line:
+            try:
+                player = int(line.rsplit("player", 1)[1].strip())
+            except ValueError:
+                continue
+    return player
+
+
+def wait_for_pad(game_log: str = "~/smash.log", timeout: float = 15.0,
+                 want: int = 1, log=print) -> bool:
+    """Wait until the game says the pad connected to ``want`` (player 1).
+
+    A pad created before the game's pad layer is up is never opened, and then
+    every menu press does nothing; the log line is the only signal the runtime
+    gives for it.
+    """
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if _last_joined_player(game_log) == want:
+            log(f"[eval] pad joined player {want}")
+            return True
+        time.sleep(0.25)
+    log(f"[eval] warning: no 'connected -> player {want}' in {game_log} "
+        f"within {timeout:.0f}s; the menu presses may do nothing")
+    return False
 
 
 def _state_ready(env) -> bool:
@@ -279,9 +316,20 @@ def drive_menus(env, pad, timeout: float = 120.0, log=print) -> bool:
                 return True
             _pad_step(pad, keys, hold)
             time.sleep(wait)
-        log(f"[eval] menu walk: pass {cycle} did not reach the fight, retrying")
+        log(f"[eval] menu walk: pass {cycle} did not reach the fight "
+            f"({_brief_state(env)}), retrying")
     log(f"[eval] menu walk: no fight after {timeout:.0f}s")
     return _fight_on(env)
+
+
+def _brief_state(env) -> str:
+    reader = getattr(env, "reader", None)
+    try:
+        s = reader.read_latest(timeout=0.5)
+    except Exception:
+        return "state unreadable"
+    n = len([f for f in s.fighters if f.get("kind")])
+    return f"match_state {s.match_state}, fighters {n}"
 
 
 def _pad_step(pad, keys: str, hold: float) -> None:
@@ -559,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="override every button threshold (the checkpoint's "
                          "per-button thresholds are tuned for offline F1 and "
                          "are silent in states the expert never visited)")
+    ap.add_argument("--game-log", default="~/smash.log",
+                    help="the game's stdout, used to confirm the pad joined")
+    ap.add_argument("--pad-timeout", type=float, default=15.0,
+                    help="seconds to wait for the pad to join player 1")
     ap.add_argument("--menu-timeout", type=float, default=120.0,
                     help="seconds to keep retrying the menu walk")
     ap.add_argument("--seed", type=int, default=0)
@@ -608,6 +660,8 @@ def main(argv: list[str] | None = None) -> int:
             pad.destroy()
         raise
     try:
+        if pad is not None:
+            wait_for_pad(args.game_log, args.pad_timeout, log=log)
         if pad is not None and not drive_menus(env, pad, args.menu_timeout, log=log):
             log("[eval] giving up: the game is not in a fight (see the menu walk)")
             return 2
