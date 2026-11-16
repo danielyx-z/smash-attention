@@ -927,13 +927,19 @@ def action_to_env(action: dict, kind: str = "array"):
 class BCPolicy:
     """Checkpoint-backed policy; feed it the 100-dim observation each step."""
 
-    def __init__(self, checkpoint: dict, device: str = "cpu"):
+    def __init__(self, checkpoint: dict, device: str = "cpu",
+                 sample: bool = False):
         if isinstance(checkpoint, str):
             checkpoint = load_checkpoint(checkpoint)
         cfg = BCConfig(**{k: v for k, v in checkpoint["config"].items()
                           if k in BCConfig.__dataclass_fields__})
         self.cfg = cfg
         self.device = torch.device(device)
+        #: ``sample`` decodes by drawing from the predicted distribution instead
+        #: of taking the argmax at a tuned threshold.  A BC policy that has
+        #: drifted off the expert's states predicts "neutral" almost surely, so
+        #: the argmax stands still in closed loop; sampling keeps it moving.
+        self.sample = bool(sample)
         self.net = BCPolicyNet(cfg).to(self.device)
         self.net.load_state_dict(checkpoint["state_dict"])
         self.net.eval()
@@ -983,13 +989,25 @@ class BCPolicy:
     def plan(self) -> list[dict]:
         """Predict the next H actions from the current observation history."""
         obs = self._window()
+        return self._plan_from(obs)
+
+    def _plan_from(self, obs: torch.Tensor) -> list[dict]:
         prev = torch.from_numpy(self._prev).unsqueeze(0).to(self.device)
         with torch.no_grad():
             out = self.net(obs, prev)
         bp = torch.sigmoid(out["buttons"])[0].cpu().numpy()      # (H,12)
+        if self.sample:
+            rng = np.random.default_rng()
+            bp = (rng.random(bp.shape) < bp).astype(np.float32)
         if self.cfg.stick_mode == "dir":
-            d = torch.argmax(out["stick"][0], dim=-1).cpu().numpy()
-            m = torch.argmax(out["stick_mag"][0], dim=-1).cpu().numpy()
+            if self.sample:
+                d = torch.multinomial(torch.softmax(out["stick"][0], dim=-1),
+                                      1).squeeze(-1).cpu().numpy()
+                m = torch.multinomial(torch.softmax(out["stick_mag"][0], dim=-1),
+                                      1).squeeze(-1).cpu().numpy()
+            else:
+                d = torch.argmax(out["stick"][0], dim=-1).cpu().numpy()
+                m = torch.argmax(out["stick_mag"][0], dim=-1).cpu().numpy()
             stick = dir_to_xy(d, m)                                # (H,2)
         else:
             stick = soft_argmax_xy(out["stick"][0], self.cfg.bins,
@@ -1003,6 +1021,10 @@ class BCPolicy:
             trigger = torch.sigmoid(out["trigger"][0]).cpu().numpy()
         else:
             trigger = np.zeros(self.cfg.horizon, np.float32)
+        if self.sample:                     # bp is already a 0/1 mask
+            ones = np.ones(N_BUTTONS, np.float32)
+            return [probs_to_action(bp[h], stick[h], cstick[h], trigger[h], ones)
+                    for h in range(self.cfg.horizon)]
         return [probs_to_action(bp[h], stick[h], cstick[h], trigger[h],
                                 self.thresholds)
                 for h in range(self.cfg.horizon)]
@@ -1793,8 +1815,9 @@ def load_checkpoint(path: str) -> dict:
     return torch.load(path, map_location="cpu", weights_only=False)
 
 
-def load_policy(path: str, device: str = "cpu") -> BCPolicy:
-    return BCPolicy(load_checkpoint(path), device=device)
+def load_policy(path: str, device: str = "cpu",
+                sample: bool = False) -> BCPolicy:
+    return BCPolicy(load_checkpoint(path), device=device, sample=sample)
 
 
 # ---------------------------------------------------------------------------

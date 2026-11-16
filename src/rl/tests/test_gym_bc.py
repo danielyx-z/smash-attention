@@ -222,6 +222,40 @@ class StickDirTest(unittest.TestCase):
             self.assertIn(key, m)
 
 
+def _untrained_policy(sample: bool):
+    cfg = bc.BCConfig(window=4, horizon=2, hidden=16, cstick=False)
+    torch.manual_seed(0)
+    checkpoint = {
+        "config": cfg.to_dict(),
+        "state_dict": bc.BCPolicyNet(cfg).state_dict(),
+        "norm": {"mean": np.zeros(bc.OBS_DIM, np.float32).tolist(),
+                 "std": np.ones(bc.OBS_DIM, np.float32).tolist()},
+        "thresholds": np.full(bc.N_BUTTONS, 0.5, np.float32).tolist(),
+    }
+    return bc.BCPolicy(checkpoint, sample=sample)
+
+
+class SamplingDecodeTest(unittest.TestCase):
+    """--sample: stochastic decoding must still produce valid, varied actions."""
+
+    def test_sampled_actions_are_binary_and_vary(self):
+        pol = _untrained_policy(sample=True)
+        obs = np.zeros(bc.OBS_DIM, np.float32)
+        actions = [pol.act(obs) for _ in range(40)]
+        buttons = np.stack([a["buttons"] for a in actions])
+        self.assertTrue(np.isin(buttons, (0.0, 1.0)).all())
+        sticks = np.stack([a["stick"] for a in actions])
+        self.assertGreater(len({tuple(np.round(v, 2)) for v in sticks}), 1)
+
+    def test_argmax_stays_deterministic(self):
+        # two fresh policies see the same empty history, so they must agree
+        obs = np.zeros(bc.OBS_DIM, np.float32)
+        a1 = _untrained_policy(sample=False).act(obs)
+        a2 = _untrained_policy(sample=False).act(obs)
+        np.testing.assert_allclose(a1["buttons"], a2["buttons"])
+        np.testing.assert_allclose(a1["stick"], a2["stick"])
+
+
 class EgoSwapTest(unittest.TestCase):
     def setUp(self):
         obs, acts = make_obs_actions(24, seed=9)

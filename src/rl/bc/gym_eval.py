@@ -548,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="walk boot -> match with the policy pad first (the pad "
                          "joins player 1 and drives the menus; needs the game "
                          "started with SSBU_KEYBOARD_PLAYER=0)")
+    ap.add_argument("--sample", action="store_true",
+                    help="draw actions from the predicted distribution instead "
+                         "of the argmax: keeps a drifted BC policy moving")
     ap.add_argument("--button-threshold", type=float, default=None,
                     help="override every button threshold (the checkpoint's "
                          "per-button thresholds are tuned for offline F1 and "
@@ -571,7 +574,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--episodes must be >= 1")
 
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
-    policy = bc.load_policy(args.model, device=args.device)
+    policy = bc.load_policy(args.model, device=args.device,
+                            sample=bool(args.sample))
     cfg = policy.cfg
     if args.button_threshold is not None:
         policy.thresholds = np.full(bc.N_BUTTONS, float(args.button_threshold),
