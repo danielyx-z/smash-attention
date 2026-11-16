@@ -1557,3 +1557,35 @@ src/rl/scripts/live_eval.sh --model data/models/bc_dk9_dir200.pt --episodes 5
 It reboots the game with `SSBU_KEYBOARD_PLAYER=0`, `SSBU_INPUT_NO_FOCUS=1`,
 `SSBU_RL_MODE=1` and the eval match spec, then runs `gym_eval --start-menus`
 (policy pad = P1, P2 = DK CPU 9). `--attach` skips the reboot.
+
+### Closed loop: the checkpoint's thresholds are silent on its own states
+
+First closed-loop numbers (DK policy vs DK CPU 9, 400 decisions x 5 frames per
+episode, pad on P1):
+
+| decoding | A rate | damage dealt (P2) | damage taken (P1) |
+|---|---|---|---|
+| checkpoint thresholds | 0.002 | 0.0, 0.0 | 80.7, 44.1 |
+| all thresholds 0.5, execute 1, no blend | 0.019 | 18.9, 0.0 | 23.9, 24.7 |
+| all thresholds 0.2 | 0.056 | 36.5, 20.2 | 83.4, 107.0 |
+
+The expert presses A on 3.9 % of decision points and the policy reproduces
+that offline (predicted rate 0.039 at the tuned 0.92 threshold, F1 0.85), but
+in the live fight it presses A on 0.2 % of them: covariant shift. The policy
+drives P1 into states the CPU-vs-CPU expert never visited (standing still,
+getting hit), and in those states its probabilities collapse to neutral, so it
+never re-engages. Lowering the thresholds buys activity and some damage, not
+competence (it also takes more damage at 0.2 than at 0.5).
+
+`gym_eval --button-threshold` exists for this diagnosis; it is not a fix. The
+candidate fixes, in the order they are being tried:
+
+1. **30 Hz decisions.** The recordings hold every 60 Hz frame, but training
+   only sampled every fifth one, so the policy can only change its stick or
+   press a button 12 times a second; Smash inputs are timed at 60. A
+   `frame_skip=2, window=12, horizon=8` model is training on the same 200
+   episodes.
+2. **DAgger with the CPU as the expert is not available**: the CPU only acts in
+   its own slot, so its actions cannot be labelled on the policy's states. What
+   is available is the reverse (policy vs CPU recordings) for offline
+   evaluation, and history dropout as a robustness augmentation.

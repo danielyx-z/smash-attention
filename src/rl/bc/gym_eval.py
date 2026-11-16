@@ -548,6 +548,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="walk boot -> match with the policy pad first (the pad "
                          "joins player 1 and drives the menus; needs the game "
                          "started with SSBU_KEYBOARD_PLAYER=0)")
+    ap.add_argument("--button-threshold", type=float, default=None,
+                    help="override every button threshold (the checkpoint's "
+                         "per-button thresholds are tuned for offline F1 and "
+                         "are silent in states the expert never visited)")
     ap.add_argument("--menu-timeout", type=float, default=120.0,
                     help="seconds to keep retrying the menu walk")
     ap.add_argument("--seed", type=int, default=0)
@@ -569,6 +573,10 @@ def main(argv: list[str] | None = None) -> int:
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     policy = bc.load_policy(args.model, device=args.device)
     cfg = policy.cfg
+    if args.button_threshold is not None:
+        policy.thresholds = np.full(bc.N_BUTTONS, float(args.button_threshold),
+                                    np.float32)
+        log(f"[eval] button thresholds forced to {args.button_threshold:.2f}")
     log(f"[eval] checkpoint config: window={cfg.window} horizon={cfg.horizon} "
         f"frame_skip={cfg.frame_skip} obs_normalize={cfg.obs_normalize} "
         f"trigger={cfg.trigger} cstick={cfg.cstick} dropout={cfg.dropout} "
