@@ -484,6 +484,10 @@ def run_episodes(env, ensemble: bc.TemporalEnsemble, episodes: int,
         "stick_abs_mean": [float(np.abs(stick[:, 0]).mean()),
                            float(np.abs(stick[:, 1]).mean())]
                           if len(stick) else [0.0, 0.0],
+        # how often the stick is left neutral: a policy that stands still
+        # shows up here long before the damage numbers say anything
+        "stick_neutral_rate": float(np.mean(
+            np.hypot(stick[:, 0], stick[:, 1]) < 0.05)) if len(stick) else 0.0,
         "cstick_mean": [float(cstick[:, 0].mean()), float(cstick[:, 1].mean())]
                        if len(cstick) else [0.0, 0.0],
         "trigger_rate": float(trigger.mean()) if len(trigger) else 0.0,
@@ -657,6 +661,9 @@ def main(argv: list[str] | None = None) -> int:
               f"{result['comparison']['mean_button_rate_divergence']:.4f}")
         print("[eval] policy button rate: " + ", ".join(
             f"{n}={v:.3f}" for n, v in result["policy_stats"]["button_rate"].items()))
+        print(f"[eval] policy stick: neutral {result['policy_stats']['stick_neutral_rate']:.3f}"
+              f" | |x| {result['policy_stats']['stick_abs_mean'][0]:.2f}"
+              f" | |y| {result['policy_stats']['stick_abs_mean'][1]:.2f}")
     return 0
 
 

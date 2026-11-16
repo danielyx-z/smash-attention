@@ -1589,3 +1589,33 @@ candidate fixes, in the order they are being tried:
    its own slot, so its actions cannot be labelled on the policy's states. What
    is available is the reverse (policy vs CPU recordings) for offline
    evaluation, and history dropout as a robustness augmentation.
+
+### Closed loop: decoding decides, decision rate does not
+
+Three configs, 2 episodes each, DK policy vs DK CPU 9, 1800 game frames per
+episode (360 decisions at 12 Hz, 900 at 30 Hz), `--execute 1 --no-blend`:
+
+| model | decoding | damage dealt (P2) | damage taken (P1) | A rate |
+|---|---|---|---|---|
+| 12 Hz | argmax at tuned thresholds | 0.0, 0.0 | 85.9, 151.8 | 0.003 |
+| 30 Hz | argmax at tuned thresholds | 0.0, 0.0 | 116.9, 101.4 | 0.006 |
+| 30 Hz | `--sample` | 18.9, 37.5 | 101.4, 73.1 | 0.054 |
+| 12 Hz | `--sample` | 26.5, 18.9 | 63.8, 101.1 | 0.046 |
+
+Two conclusions:
+
+1. **The argmax stands still.** Whatever the decision rate, the policy's
+   argmax is neutral in the states it actually reaches, so P1 deals no damage
+   at all. Sampling the same distributions gets it moving (A 0.003 -> 0.054)
+   and dealing damage. The decision rate (12 vs 30 Hz) barely matters next to
+   the decoding.
+2. **The policy is still far from the expert** — it loses both stocks while
+   dealing 20-40 %. This is a data/learning problem, not a plumbing one: the
+   plumbing (pad owns P1, menus walked by the pad, in-fight rematch) now runs
+   three consecutive evaluations with no manual step, reaching the fight in
+   30 s each time.
+
+The offline numbers are not the problem: test `f1_change` 0.695-0.711,
+`f1_active` 0.61-0.70, stick direction 0.85. They are measured on the expert's
+own state distribution, which is exactly the distribution the closed loop
+leaves.
