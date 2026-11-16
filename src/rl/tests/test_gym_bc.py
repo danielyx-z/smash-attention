@@ -448,6 +448,7 @@ class NormalizationTest(unittest.TestCase):
         samples = bc.window_samples(obs, acts, 8, 4)
         mean, std = bc.norm_stats(samples["windows"])
         ds = bc.WindowDataset(samples, mean, std)
+        self.assertIs(ds.windows, samples["windows"])   # no second copy
         w, p, t = ds[0]
         expected = (samples["windows"][0] - mean) / std
         np.testing.assert_allclose(w.numpy(), expected, rtol=1e-5, atol=1e-5)

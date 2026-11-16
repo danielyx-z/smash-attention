@@ -836,10 +836,19 @@ class BCPolicyNet(nn.Module):
 
 
 class WindowDataset(Dataset):
+    """Windows normalized in ``__getitem__``.
+
+    The normalization used to copy the whole array up front, which doubled the
+    dataset's memory; a 30 Hz set (1.7M windows x 8 frames x 112) is several GB
+    on its own and the copy was what the OOM killer took.
+    """
+
     def __init__(self, samples: dict, mean, std):
-        self.windows = normalize(samples["windows"], mean, std)
+        self.windows = samples["windows"]      # the only copy
         self.prev = samples["prev"].astype(np.float32)
         self.targets = samples["targets"]
+        self.mean = np.asarray(mean, np.float32)
+        self.std = np.asarray(std, np.float32)
 
     def __len__(self) -> int:
         return len(self.windows)
@@ -847,7 +856,9 @@ class WindowDataset(Dataset):
     def __getitem__(self, i: int):
         # every target key travels (stick_mag exists in the direction stick mode)
         targets = {k: torch.from_numpy(v[i]) for k, v in self.targets.items()}
-        return (torch.from_numpy(self.windows[i]),
+        window = ((self.windows[i] - self.mean) / self.std).astype(np.float32,
+                                                                  copy=False)
+        return (torch.from_numpy(window),
                 torch.from_numpy(self.prev[i]), targets)
 
 
