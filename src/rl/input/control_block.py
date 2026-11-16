@@ -119,12 +119,18 @@ CMD_NONE = 0
 CMD_SET_SEED = 1
 CMD_SET_PAD = 2
 CMD_CLEAR_PAD = 3
+#: DAgger: hand player 1 to the CPU for ``arg0`` presented frames.  The CPU's
+#: own input for player 1 lands in the control module, which the state block
+#: publishes as that fighter's buttons/stick: the expert label for the state the
+#: policy produced.  ``flags`` bit 4 = forcing right now, bit 5 = P1 is CPU.
+CMD_HANDOVER = 4
 
 CMD_NAMES = {
     CMD_NONE: "none",
     CMD_SET_SEED: "set_seed",
     CMD_SET_PAD: "set_pad",
     CMD_CLEAR_PAD: "clear_pad",
+    CMD_HANDOVER: "handover",
 }
 
 # ``set_pad`` arg1 is fed straight to the synthetic XInput pad in the runtime

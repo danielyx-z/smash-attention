@@ -453,6 +453,9 @@ class Episode:
         self.bounds = (0.0, 0.0, 0.0, 0.0)
         self.stage_id = 0
         self.result: dict = {}
+        #: extra per-frame arrays contributed by another collector (a DAgger
+        #: run appends ``expert_mask`` here); saved alongside the standard ones
+        self.extra: dict[str, list] = {}
         self._last_seq: int | None = None
 
     def __len__(self) -> int:
@@ -496,7 +499,7 @@ class Episode:
         # under both names so either convention loads without allow_pickle.
         meta_json = json.dumps(_jsonable(self.meta), sort_keys=True)
         result_json = json.dumps(_jsonable(self.result), sort_keys=True)
-        return {
+        out = {
             "seq": np.asarray(self.seq, dtype=np.uint64),
             "ts_ns": np.asarray(self.ts_ns, dtype=np.uint64),
             "raw_fighters": raw,
@@ -516,6 +519,9 @@ class Episode:
             "bounds": np.asarray(self.bounds, dtype=np.float32),
             "seq_gaps": np.asarray(self.seq_gaps, dtype=np.int64),
         }
+        for name, rows in self.extra.items():
+            out[name] = np.asarray(rows)
+        return out
 
     def save(self, path: str, frame_skip: int = FRAME_SKIP) -> None:
         arrays = self.arrays(frame_skip)

@@ -218,7 +218,6 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
 #: before A picks; A on the "READY TO FIGHT" banner starts the match.  This is
 #: what a person does with a controller, only from code.
 MENU_MACRO: tuple[tuple[str, float, float], ...] = (
-    ("B", 0.10, 0.6),          # cancel a dialog or roster left by a failed pass
     ("A", 0.10, 0.9),          # "PRESS ANY BUTTON" -> main menu
     ("A", 0.10, 0.9),          # Smash tile -> Smash submenu
     ("A", 0.10, 0.9),          # regular Smash -> rules
