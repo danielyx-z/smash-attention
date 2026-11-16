@@ -235,6 +235,24 @@ def _untrained_policy(sample: bool):
     return bc.BCPolicy(checkpoint, sample=sample)
 
 
+class WindowDtypeTest(unittest.TestCase):
+    """float16 window storage must not change the samples materially."""
+
+    def test_float16_storage_round_trips(self):
+        cfg = bc.BCConfig(window=4, horizon=2)
+        ep = bc.synthetic_episode(30, seed=5)
+        f32 = bc.samples_for([ep], cfg)
+        f16 = bc.samples_for([ep], cfg, window_dtype=np.float16)
+        self.assertEqual(f16["windows"].dtype, np.float16)
+        self.assertEqual(f16["windows"].shape, f32["windows"].shape)
+        np.testing.assert_allclose(f16["windows"].astype(np.float32),
+                                   f32["windows"], atol=0.5, rtol=1e-3)
+        np.testing.assert_array_equal(f16["targets"]["buttons"],
+                                      f32["targets"]["buttons"])
+        mean, std = bc.norm_stats(f16["windows"])     # statistics in float32
+        self.assertEqual(mean.dtype, np.float32)
+
+
 class ReturnWeightTest(unittest.TestCase):
     """Conservative return weighting (damage differential only)."""
 

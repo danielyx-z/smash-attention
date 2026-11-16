@@ -617,7 +617,8 @@ def _empty_targets(horizon: int, stick_mode: str) -> dict:
 def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
                    horizon: int = 4, include_cstick: bool = False,
                    include_trigger: bool = True, stick_mode: str = "grid",
-                   frame_weights: np.ndarray | None = None) -> dict:
+                   frame_weights: np.ndarray | None = None,
+                   window_dtype: Any = np.float32) -> dict:
     """Build aligned samples for one episode (never crosses an episode).
 
     Window at decision ``t`` = observations ``t-window+1 .. t``; previous
@@ -637,7 +638,7 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
             out["weights"] = np.zeros(0, np.float32)
         return out
     t = np.arange(window - 1, n - horizon + 1)
-    windows = np.stack([obs[i - window + 1:i + 1] for i in t]).astype(np.float32)
+    windows = np.stack([obs[i - window + 1:i + 1] for i in t]).astype(window_dtype)
     prev = prev_action_vectors(acts, include_cstick, include_trigger)[t]
     buttons = np.stack([acts["buttons"][i:i + horizon] for i in t]).astype(np.float32)
     cstick = np.stack([stick_to_bin(acts["cstick"][i:i + horizon]) for i in t])
@@ -664,8 +665,16 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
 def concat_samples(parts: list[dict]) -> dict:
     if not parts:
         raise ValueError("no sample parts")
+    total = sum(len(p["windows"]) for p in parts)
+    windows = np.empty((total,) + parts[0]["windows"].shape[1:],
+                       parts[0]["windows"].dtype)
+    at = 0
+    for p in parts:                      # one copy, then each part can go
+        n = len(p["windows"])
+        windows[at:at + n] = p["windows"]
+        at += n
     out = {
-        "windows": np.concatenate([p["windows"] for p in parts], axis=0),
+        "windows": windows,
         "prev": np.concatenate([p["prev"] for p in parts], axis=0),
         "targets": {
             key: np.concatenate([p["targets"][key] for p in parts], axis=0)
@@ -714,7 +723,8 @@ def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
                 return_beta: float = 0.0, return_gamma: float = 0.995,
                 weight_quantile: float = 0.5, weight_min: float = 0.1,
                 weight_max: float = 10.0,
-                reward_scale: float = 0.01) -> dict:
+                reward_scale: float = 0.01,
+                window_dtype: Any = np.float32) -> dict:
     """Windows for these episodes; with ``return_beta > 0`` each sample also
     carries a conservative return weight (see :func:`return_weights`)."""
     parts = []
@@ -732,13 +742,15 @@ def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
             parts.append(window_samples(v.obs, v.acts, cfg.window, cfg.horizon,
                                         cfg.cstick, cfg.trigger,
                                         stick_mode=cfg.stick_mode,
-                                        frame_weights=fw))
+                                        frame_weights=fw,
+                                        window_dtype=window_dtype))
             if mirror:
                 mv = mirror_episode(v)
                 parts.append(window_samples(mv.obs, mv.acts, cfg.window,
                                             cfg.horizon, cfg.cstick, cfg.trigger,
                                             stick_mode=cfg.stick_mode,
-                                            frame_weights=fw))
+                                            frame_weights=fw,
+                                            window_dtype=window_dtype))
     return concat_samples(parts)
 
 
@@ -767,7 +779,8 @@ def split_episodes(n: int, seed: int = 0,
 
 
 def norm_stats(windows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    flat = windows.reshape(-1, windows.shape[-1])
+    # float16 storage is fine for the network input, not for the statistics
+    flat = np.asarray(windows, np.float32).reshape(-1, windows.shape[-1])
     mean = flat.mean(axis=0)
     std = flat.std(axis=0)
     std = np.where(std < 1e-6, 1.0, std)
@@ -1508,7 +1521,7 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
           init_from: str | None = None, return_beta: float = 0.0,
           return_gamma: float = 0.995, weight_quantile: float = 0.5,
           weight_min: float = 0.1, weight_max: float = 10.0,
-          reward_scale: float = 0.01,
+          reward_scale: float = 0.01, window_dtype: str = "float32",
           log=print) -> tuple[dict, dict]:
     """Train from a recording directory; returns ``(checkpoint, metrics)``.
 
@@ -1527,7 +1540,7 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
                       return_gamma=return_gamma,
                       weight_quantile=weight_quantile, weight_min=weight_min,
                       weight_max=weight_max, reward_scale=reward_scale,
-                      log=log)
+                      window_dtype=window_dtype, log=log)
     finally:
         torch.set_num_threads(old)
 
@@ -1542,6 +1555,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
            return_beta: float = 0.0, return_gamma: float = 0.995,
            weight_quantile: float = 0.5, weight_min: float = 0.1,
            weight_max: float = 10.0, reward_scale: float = 0.01,
+           window_dtype: str = "float32",
            log=print) -> tuple[dict, dict]:
     cfg = cfg or BCConfig()
     if dropout is not None:
@@ -1596,9 +1610,11 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         log(f"[bc] shield-from-status OFF: {shield_labels['total']['frames']} "
             "guard decisions keep their raw mask")
 
+    dtype = np.float16 if str(window_dtype) == "float16" else np.float32
     weighted = dict(return_beta=return_beta, return_gamma=return_gamma,
                     weight_quantile=weight_quantile, weight_min=weight_min,
-                    weight_max=weight_max, reward_scale=reward_scale)
+                    weight_max=weight_max, reward_scale=reward_scale,
+                    window_dtype=dtype)
     train_samples = samples_for(train_eps, cfg, mirror=mirror,
                                 ego_swap=ego_swap, **weighted)
     if return_beta > 0 and "weights" in train_samples:
@@ -1797,6 +1813,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
             "weight_quantile": float(weight_quantile),
             "weight_clip": [float(weight_min), float(weight_max)],
             "reward_scale": float(reward_scale),
+            "window_dtype": str(np.dtype(dtype)),
         },
         "meta": {
             "data": os.path.abspath(data_dir),
@@ -1995,6 +2012,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="quantile of the return used as the weight baseline")
     ap.add_argument("--weight-clip", type=float, nargs=2, default=(0.1, 10.0),
                     metavar=("MIN", "MAX"), help="clip on the per-sample weight")
+    ap.add_argument("--window-dtype", choices=("float32", "float16"),
+                    default="float32",
+                    help="storage dtype of the observation windows: float16 "
+                         "halves the dataset memory for a 30 Hz run")
     ap.add_argument("--reward-scale", type=float, default=0.01,
                     help="reward units per percent of damage")
     ap.add_argument("--init-from", default=None,
@@ -2063,7 +2084,8 @@ def main(argv: list[str] | None = None) -> int:
                           weight_quantile=args.weight_quantile,
                           weight_min=args.weight_clip[0],
                           weight_max=args.weight_clip[1],
-                          reward_scale=args.reward_scale, log=log)
+                          reward_scale=args.reward_scale,
+                          window_dtype=args.window_dtype, log=log)
     summary = {
         "checkpoint": os.path.abspath(args.out),
         "best_epoch": metrics["best_epoch"],
