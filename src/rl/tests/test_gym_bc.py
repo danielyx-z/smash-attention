@@ -180,6 +180,47 @@ class WindowAlignmentTest(unittest.TestCase):
                 np.testing.assert_array_equal(a, b)
 
 
+class StickDirTest(unittest.TestCase):
+    def test_encoding(self):
+        v = np.array([[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1],
+                      [0.6, 0.6], [0.1, 0.0]], np.float32)
+        d, m = bc.stick_to_dir(v)
+        self.assertEqual(d.tolist(), [0, 1, 3, 5, 7, 2, 1])
+        self.assertEqual(m.tolist(), [0, 2, 2, 2, 2, 2, 1])
+        back = bc.dir_to_xy(d, m)
+        np.testing.assert_allclose(back[1], [1.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(back[5], [0.7071, 0.7071], atol=1e-3)
+        np.testing.assert_allclose(back[0], [0.0, 0.0])
+
+    def test_targets_and_model(self):
+        cfg = bc.BCConfig(window=4, horizon=2, stick_mode="dir")
+        obs, acts = make_obs_actions(30, seed=3)
+        acts["stick"] = np.tile(np.array([[1.0, 0.0]], np.float32), (30, 1))
+        ep = episode_from_obs_actions(obs, acts, index=0)
+        samples = bc.samples_for([ep], cfg)
+        self.assertIn("stick", samples["targets"])
+        self.assertIn("stick_mag", samples["targets"])
+        self.assertTrue((samples["targets"]["stick"] == 1).all())
+        net = bc.BCPolicyNet(cfg)
+        out = net(torch.zeros(2, cfg.window, cfg.obs_dim),
+                  torch.zeros(2, cfg.prev_dim))
+        self.assertEqual(out["stick"].shape, (2, cfg.horizon, bc.STICK_DIRS))
+        self.assertEqual(out["stick_mag"].shape, (2, cfg.horizon, bc.STICK_MAGS))
+
+    def test_metrics_dir_mode(self):
+        cfg = bc.BCConfig(window=4, horizon=2, stick_mode="dir")
+        obs, acts = make_obs_actions(24, seed=4)
+        ep = episode_from_obs_actions(obs, acts, index=0)
+        samples = bc.samples_for([ep], cfg)
+        pred = bc.copy_last_pred(samples, "dir")
+        m = bc.compute_metrics(pred, bc.first_actions(samples),
+                               prev=samples["prev"], mode="dir")
+        self.assertEqual(m["stick_mode"], "dir")
+        for key in ("stick_acc", "stick_mag_acc", "stick_mae", "stick_within",
+                    "change_dir_acc"):
+            self.assertIn(key, m)
+
+
 class EgoSwapTest(unittest.TestCase):
     def setUp(self):
         obs, acts = make_obs_actions(24, seed=9)

@@ -225,6 +225,49 @@ def stick_to_bin(v, bins: int = STICK_BINS) -> np.ndarray:
     return xi * bins + yi
 
 
+#: Coarse stick scheme: neutral + 8 compass directions (the expert stick is
+#: binary in practice: 58.7 % |v| < 0.05, 37.8 % |v| >= 0.7, 3.5 % between).
+STICK_DIRS = 9
+STICK_MAGS = 3
+STICK_NEUTRAL = 0.05
+STICK_FULL = 0.70
+MAG_SCALE = (0.0, 0.5, 1.0)
+_DIR_VEC = np.array([[0.0, 0.0], [1.0, 0.0], [0.7071, 0.7071], [0.0, 1.0],
+                     [-0.7071, 0.7071], [-1.0, 0.0], [-0.7071, -0.7071],
+                     [0.0, -1.0], [0.7071, -0.7071]], np.float32)
+
+
+def stick_to_dir(v):
+    """(..., 2) stick -> (direction 0..8, magnitude 0..2).
+
+    Direction 0 is neutral; 1..8 are E, NE, N, NW, W, SW, S, SE (45 degree
+    sectors).  Magnitude is 0 neutral, 1 partial, 2 full deflection.
+    """
+    v = np.asarray(v, np.float32)
+    x, y = v[..., 0], v[..., 1]
+    m = np.hypot(x, y)
+    ang = np.degrees(np.arctan2(y, x))
+    sector = np.floor(((ang + 22.5) % 360.0) / 45.0).astype(np.int64)
+    neutral = m < STICK_NEUTRAL
+    d = np.where(neutral, 0, sector + 1).astype(np.int64)
+    mag = np.where(neutral, 0, np.where(m >= STICK_FULL, 2, 1)).astype(np.int64)
+    return d, mag
+
+
+def dir_to_xy(d, mag) -> np.ndarray:
+    d = np.asarray(d, np.int64)
+    mag = np.asarray(mag, np.int64)
+    return _DIR_VEC[d] * np.asarray(MAG_SCALE, np.float32)[mag, None]
+
+
+def stick_targets(v, mode: str = "grid"):
+    """Target pair (primary, magnitude-or-None) for a stick array and a mode."""
+    if mode == "dir":
+        d, m = stick_to_dir(v)
+        return d, m
+    return stick_to_bin(v), None
+
+
 def bin_to_xy(flat, bins: int = STICK_BINS) -> np.ndarray:
     flat = np.asarray(flat, dtype=np.int64)
     centers = bin_centers(bins)
@@ -505,9 +548,19 @@ def prev_action_vectors(acts: dict, include_cstick: bool,
     return np.vstack([np.zeros((1, vec.shape[1]), np.float32), vec[:-1]])
 
 
+def _empty_targets(horizon: int, stick_mode: str) -> dict:
+    t = {"buttons": np.zeros((0, horizon, N_BUTTONS), np.float32),
+         "stick": np.zeros((0, horizon), np.int64),
+         "cstick": np.zeros((0, horizon), np.int64),
+         "trigger": np.zeros((0, horizon), np.float32)}
+    if stick_mode == "dir":
+        t["stick_mag"] = np.zeros((0, horizon), np.int64)
+    return t
+
+
 def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
                    horizon: int = 4, include_cstick: bool = False,
-                   include_trigger: bool = True) -> dict:
+                   include_trigger: bool = True, stick_mode: str = "grid") -> dict:
     """Build aligned samples for one episode (never crosses an episode).
 
     Window at decision ``t`` = observations ``t-window+1 .. t``; previous
@@ -522,22 +575,25 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
         return {"windows": empty,
                 "prev": np.zeros((0, 12 + 2 + (2 if include_cstick else 0) +
                                   (1 if include_trigger else 0)), np.float32),
-                "targets": {"buttons": np.zeros((0, horizon, N_BUTTONS), np.float32),
-                            "stick": np.zeros((0, horizon), np.int64),
-                            "cstick": np.zeros((0, horizon), np.int64),
-                            "trigger": np.zeros((0, horizon), np.float32)}}
+                "targets": _empty_targets(horizon, stick_mode)}
     t = np.arange(window - 1, n - horizon + 1)
     windows = np.stack([obs[i - window + 1:i + 1] for i in t]).astype(np.float32)
     prev = prev_action_vectors(acts, include_cstick, include_trigger)[t]
     buttons = np.stack([acts["buttons"][i:i + horizon] for i in t]).astype(np.float32)
-    stick = np.stack([stick_to_bin(acts["stick"][i:i + horizon]) for i in t])
     cstick = np.stack([stick_to_bin(acts["cstick"][i:i + horizon]) for i in t])
     trigger = np.stack([acts["trigger"][i:i + horizon] for i in t]).astype(np.float32)
+    targets = {"buttons": buttons,
+               "cstick": cstick, "trigger": trigger}
+    if stick_mode == "dir":
+        d, m = stick_to_dir(acts["stick"])
+        targets["stick"] = np.stack([d[i:i + horizon] for i in t])
+        targets["stick_mag"] = np.stack([m[i:i + horizon] for i in t])
+    else:
+        targets["stick"] = np.stack([stick_to_bin(acts["stick"][i:i + horizon]) for i in t])
     return {
         "windows": windows,
         "prev": prev.astype(np.float32),
-        "targets": {"buttons": buttons, "stick": stick,
-                    "cstick": cstick, "trigger": trigger},
+        "targets": targets,
     }
 
 
@@ -595,11 +651,13 @@ def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
             variants.append(ego_swap_episode(ep))
         for v in variants:
             parts.append(window_samples(v.obs, v.acts, cfg.window, cfg.horizon,
-                                        cfg.cstick, cfg.trigger))
+                                        cfg.cstick, cfg.trigger,
+                                        stick_mode=cfg.stick_mode))
             if mirror:
                 mv = mirror_episode(v)
                 parts.append(window_samples(mv.obs, mv.acts, cfg.window,
-                                            cfg.horizon, cfg.cstick, cfg.trigger))
+                                            cfg.horizon, cfg.cstick, cfg.trigger,
+                                            stick_mode=cfg.stick_mode))
     return concat_samples(parts)
 
 
@@ -713,6 +771,7 @@ class BCConfig:
     hidden: int = 256
     gru_layers: int = 1
     bins: int = STICK_BINS
+    stick_mode: str = "grid"          # "grid" = 9x9 heatmap, "dir" = 9 dirs + 3 magnitudes
     cstick: bool = False
     trigger: bool = True
     player: int = 0
@@ -746,7 +805,9 @@ class BCPolicyNet(nn.Module):
         )
         h, H, bins = cfg.hidden, cfg.horizon, cfg.bins
         self.button_head = nn.Linear(h, H * N_BUTTONS)
-        self.stick_head = nn.Linear(h, H * bins * bins)
+        self.stick_out = STICK_DIRS if cfg.stick_mode == "dir" else bins * bins
+        self.stick_head = nn.Linear(h, H * self.stick_out)
+        self.stick_mag_head = nn.Linear(h, H * STICK_MAGS) if cfg.stick_mode == "dir" else None
         self.cstick_head = nn.Linear(h, H * bins * bins) if cfg.cstick else None
         self.trigger_head = nn.Linear(h, H) if cfg.trigger else None
 
@@ -758,8 +819,10 @@ class BCPolicyNet(nn.Module):
         B, H, bins = z.shape[0], cfg.horizon, cfg.bins
         out = {
             "buttons": self.button_head(z).reshape(B, H, N_BUTTONS),
-            "stick": self.stick_head(z).reshape(B, H, bins * bins),
+            "stick": self.stick_head(z).reshape(B, H, self.stick_out),
         }
+        if self.stick_mag_head is not None:
+            out["stick_mag"] = self.stick_mag_head(z).reshape(B, H, STICK_MAGS)
         if self.cstick_head is not None:
             out["cstick"] = self.cstick_head(z).reshape(B, H, bins * bins)
         if self.trigger_head is not None:
@@ -913,8 +976,13 @@ class BCPolicy:
         with torch.no_grad():
             out = self.net(obs, prev)
         bp = torch.sigmoid(out["buttons"])[0].cpu().numpy()      # (H,12)
-        stick = soft_argmax_xy(out["stick"][0], self.cfg.bins,
-                               ).cpu().numpy()                    # (H,2)
+        if self.cfg.stick_mode == "dir":
+            d = torch.argmax(out["stick"][0], dim=-1).cpu().numpy()
+            m = torch.argmax(out["stick_mag"][0], dim=-1).cpu().numpy()
+            stick = dir_to_xy(d, m)                                # (H,2)
+        else:
+            stick = soft_argmax_xy(out["stick"][0], self.cfg.bins,
+                                   ).cpu().numpy()                 # (H,2)
         if "cstick" in out:
             cstick = soft_argmax_xy(out["cstick"][0], self.cfg.bins,
                                     ).cpu().numpy()
@@ -1025,7 +1093,8 @@ def _f1(pred: np.ndarray, target: np.ndarray) -> float:
 
 def compute_metrics(pred: dict, target: dict,
                     thresholds: np.ndarray | None = None,
-                    prev: np.ndarray | None = None) -> dict:
+                    prev: np.ndarray | None = None,
+                    mode: str = "grid") -> dict:
     """Per-button F1, stick accuracy, and action-rate divergence."""
     bp = np.asarray(pred["buttons"], np.float32)
     tb = np.asarray(target["buttons"], np.float32)
@@ -1044,17 +1113,30 @@ def compute_metrics(pred: dict, target: dict,
     divergence = {name: float(abs(rate_pred[i] - rate_expert[i]))
                   for i, name in enumerate(BUTTONS)}
 
-    stick_pred = np.asarray(pred["stick_bin"], np.int64)
-    stick_true = np.asarray(target["stick"], np.int64)
-    if stick_true.ndim == 2:
-        stick_true = stick_true[:, 0]
-        stick_pred = stick_pred[:, 0] if stick_pred.ndim == 2 else stick_pred
-    stick_acc = float(np.mean(stick_pred == stick_true)) if len(stick_true) else 0.0
-    stick_xy = np.asarray(pred["stick"], np.float32)
-    true_xy = bin_to_xy(stick_true)
-    if stick_xy.ndim == 3:
-        stick_xy = stick_xy[:, 0]
-    stick_mae = float(np.mean(np.abs(stick_xy - true_xy))) if len(true_xy) else 0.0
+    if mode == "dir":
+        t_dir = np.asarray(target["stick"], np.int64)
+        t_mag = np.asarray(target["stick_mag"], np.int64)
+        p_dir = np.asarray(pred["stick_dir"], np.int64)
+        p_mag = np.asarray(pred["stick_mag"], np.int64)
+        if t_dir.ndim == 2:
+            t_dir, t_mag = t_dir[:, 0], t_mag[:, 0]
+        stick_true = t_dir
+        stick_pred = p_dir
+        stick_acc = float(np.mean(p_dir == t_dir)) if len(t_dir) else 0.0
+        stick_mae = float(np.mean(np.abs(dir_to_xy(p_dir, p_mag) -
+                                             dir_to_xy(t_dir, t_mag))))             if len(t_dir) else 0.0
+    else:
+        stick_pred = np.asarray(pred["stick_bin"], np.int64)
+        stick_true = np.asarray(target["stick"], np.int64)
+        if stick_true.ndim == 2:
+            stick_true = stick_true[:, 0]
+            stick_pred = stick_pred[:, 0] if stick_pred.ndim == 2 else stick_pred
+        stick_acc = float(np.mean(stick_pred == stick_true)) if len(stick_true) else 0.0
+        stick_xy = np.asarray(pred["stick"], np.float32)
+        true_xy = bin_to_xy(stick_true)
+        if stick_xy.ndim == 3:
+            stick_xy = stick_xy[:, 0]
+        stick_mae = float(np.mean(np.abs(stick_xy - true_xy))) if len(true_xy) else 0.0
 
     active = [name for i, name in enumerate(BUTTONS)
               if (rate_expert[i] > 0 or rate_pred[i] > 0)]
@@ -1078,17 +1160,33 @@ def compute_metrics(pred: dict, target: dict,
         "stick_mae": stick_mae,
         "thresholds": [float(v) for v in th],
     }
+    if mode == "dir":
+        out["stick_mode"] = "dir"
+        out["stick_parts"] = int(STICK_DIRS)
+        out["stick_mag_acc"] = float(np.mean(p_mag == t_mag)) if len(t_mag) else 0.0
+        if len(t_dir):
+            d_xy = np.abs(dir_to_xy(p_dir, p_mag) - dir_to_xy(t_dir, t_mag))
+            out["stick_within"] = float(np.mean(d_xy.max(axis=-1) < 0.25))
+        else:
+            out["stick_within"] = 0.0
+    else:
+        out["stick_parts"] = int(STICK_BINS * STICK_BINS)
     if prev is not None:
         # Decision points: target differs from the previous action.  This is the
         # 16.5 % of samples where the behaviour actually changes; the rest is
         # "hold", which a copy-last model gets for free.
         pv = np.asarray(prev, np.float32)
         pbtn = pv[:, :12] >= 0.5
-        pstick = stick_to_bin(pv[:, 12:14])
-        tstick = np.asarray(target["stick"], np.int64)
-        if tstick.ndim == 2:
-            tstick = tstick[:, 0]
-        change = (tb != pbtn).any(axis=1) | (tstick != pstick)
+        if mode == "dir":
+            p_dir, p_mag = stick_to_dir(pv[:, 12:14])
+            change = (tb != pbtn).any(axis=1) | (stick_true != p_dir) | \
+                (t_mag != p_mag)
+        else:
+            pstick = stick_to_bin(pv[:, 12:14])
+            tstick = np.asarray(target["stick"], np.int64)
+            if tstick.ndim == 2:
+                tstick = tstick[:, 0]
+            change = (tb != pbtn).any(axis=1) | (tstick != pstick)
         nch = int(change.sum())
         f1_ch = {name: _f1(pred_bin[change, i], tb[change, i])
                  for i, name in enumerate(BUTTONS)} if nch else {n: 1.0 for n in BUTTONS}
@@ -1100,6 +1198,9 @@ def compute_metrics(pred: dict, target: dict,
         out["change_mean_f1"] = float(np.mean(list(f1_ch.values()))) if nch else 1.0
         out["change_mean_f1_active"] = float(np.mean([f1_ch[n] for n in active_ch])) \
             if active_ch else 1.0
+        if mode == "dir" and nch:
+            out["change_dir_acc"] = float(np.mean(stick_pred[change] ==
+                                                  stick_true[change]))
     if "cstick_bin" in target and "cstick_bin" in pred:
         cp = np.asarray(pred["cstick_bin"], np.int64)
         ct = np.asarray(target["cstick_bin"], np.int64)
@@ -1130,11 +1231,22 @@ def _loss(out: dict, targets: dict, pos_weight: torch.Tensor,
           cfg: BCConfig) -> tuple[torch.Tensor, dict]:
     loss_btn = F.binary_cross_entropy_with_logits(
         out["buttons"], targets["buttons"], pos_weight=pos_weight)
-    loss_stick = F.cross_entropy(
-        out["stick"].reshape(-1, out["stick"].shape[-1]),
-        targets["stick"].reshape(-1))
-    loss = loss_btn + loss_stick
-    parts = {"buttons": float(loss_btn.detach()), "stick": float(loss_stick.detach())}
+    if cfg.stick_mode == "dir":
+        loss_stick = F.cross_entropy(out["stick"].reshape(-1, STICK_DIRS),
+                                     targets["stick"].reshape(-1))
+        loss_mag = F.cross_entropy(out["stick_mag"].reshape(-1, STICK_MAGS),
+                                   targets["stick_mag"].reshape(-1))
+        loss = loss_btn + loss_stick + 0.5 * loss_mag
+        parts = {"buttons": float(loss_btn.detach()),
+                 "stick": float(loss_stick.detach()),
+                 "stick_mag": float(loss_mag.detach())}
+    else:
+        loss_stick = F.cross_entropy(
+            out["stick"].reshape(-1, out["stick"].shape[-1]),
+            targets["stick"].reshape(-1))
+        loss = loss_btn + loss_stick
+        parts = {"buttons": float(loss_btn.detach()),
+                 "stick": float(loss_stick.detach())}
     if cfg.cstick and "cstick" in out:
         lc = F.cross_entropy(out["cstick"].reshape(-1, out["cstick"].shape[-1]),
                              targets["cstick"].reshape(-1))
@@ -1154,26 +1266,35 @@ def collect_predictions(model: BCPolicyNet, samples: dict, mean, std,
     ds = WindowDataset(samples, mean, std)
     loader = DataLoader(ds, batch_size=batch, shuffle=False, num_workers=0)
     model.eval()
-    bp, sb, cb, tr, sl = [], [], [], [], []
+    mode = model.cfg.stick_mode
+    bp, sb, cb, tr, sl, sm = [], [], [], [], [], []
     with torch.no_grad():
         for obs, prev, targets in loader:
             obs = obs.to(device)
             prev = prev.to(device)
             out = model(obs, prev)
             bp.append(torch.sigmoid(out["buttons"][:, 0]).cpu().numpy())
-            sl.append(out["stick"][:, 0].cpu().numpy())
             sb.append(torch.argmax(out["stick"][:, 0], dim=-1).cpu().numpy())
+            if mode == "dir":
+                sm.append(torch.argmax(out["stick_mag"][:, 0], dim=-1).cpu().numpy())
+            else:
+                sl.append(out["stick"][:, 0].cpu().numpy())
             if "cstick" in out:
                 cb.append(torch.argmax(out["cstick"][:, 0], dim=-1).cpu().numpy())
             if "trigger" in out:
                 tr.append(torch.sigmoid(out["trigger"][:, 0]).cpu().numpy())
     pred = {
         "buttons": np.concatenate(bp) if bp else np.zeros((0, N_BUTTONS)),
-        "stick_logits": np.concatenate(sl) if sl else np.zeros((0, N_ACTIONS)),
         "stick_bin": np.concatenate(sb) if sb else np.zeros(0, np.int64),
     }
-    pred["stick"] = soft_argmax_np(pred["stick_logits"]) if len(pred["stick_logits"]) \
-        else np.zeros((0, 2), np.float32)
+    if mode == "dir":
+        pred["stick_dir"] = pred["stick_bin"]
+        pred["stick_mag"] = np.concatenate(sm) if sm else np.zeros(0, np.int64)
+        pred["stick"] = dir_to_xy(pred["stick_dir"], pred["stick_mag"])
+    else:
+        pred["stick_logits"] = np.concatenate(sl) if sl else np.zeros((0, N_ACTIONS))
+        pred["stick"] = soft_argmax_np(pred["stick_logits"]) \
+            if len(pred["stick_logits"]) else np.zeros((0, 2), np.float32)
     if cb:
         pred["cstick_bin"] = np.concatenate(cb)
     if tr:
@@ -1181,10 +1302,14 @@ def collect_predictions(model: BCPolicyNet, samples: dict, mean, std,
     return pred
 
 
-def copy_last_pred(samples: dict) -> dict:
+def copy_last_pred(samples: dict, mode: str = "grid") -> dict:
     """The trivial policy: repeat the previous action (no learning at all)."""
     prev = np.asarray(samples["prev"], np.float32)
     stick = prev[:, 12:14]
+    if mode == "dir":
+        d, m = stick_to_dir(stick)
+        return {"buttons": prev[:, :12], "stick_dir": d, "stick_bin": d,
+                "stick_mag": m, "stick": dir_to_xy(d, m)}
     return {
         "buttons": prev[:, :12],
         "stick": stick,
@@ -1192,20 +1317,25 @@ def copy_last_pred(samples: dict) -> dict:
     }
 
 
-def copy_last_metrics(samples: dict) -> dict:
+def copy_last_metrics(samples: dict, mode: str = "grid") -> dict:
     """Metrics of the copy-last policy on the same samples (baseline)."""
     target = first_actions(samples)
     # binary inputs: no calibration, a 0.5 threshold is exact
-    return compute_metrics(copy_last_pred(samples), target,
+    return compute_metrics(copy_last_pred(samples, mode), target,
                            thresholds=np.full(N_BUTTONS, 0.5, np.float32),
-                           prev=samples["prev"])
+                           prev=samples["prev"], mode=mode)
 
 
-def transition_mask(samples: dict) -> np.ndarray:
+def transition_mask(samples: dict, mode: str = "grid") -> np.ndarray:
     """True where the target action differs from the previous one."""
     prev = np.asarray(samples["prev"], np.float32)
     tb = samples["targets"]["buttons"][:, 0]
     pbtn = prev[:, :12] >= 0.5
+    if mode == "dir":
+        p_dir, p_mag = stick_to_dir(prev[:, 12:14])
+        t_dir = samples["targets"]["stick"][:, 0]
+        t_mag = samples["targets"]["stick_mag"][:, 0]
+        return (tb != pbtn).any(axis=1) | (t_dir != p_dir) | (t_mag != p_mag)
     pstick = stick_to_bin(prev[:, 12:14])
     tstick = samples["targets"]["stick"][:, 0]
     return (tb != pbtn).any(axis=1) | (tstick != pstick)
@@ -1213,13 +1343,16 @@ def transition_mask(samples: dict) -> np.ndarray:
 
 def first_actions(samples: dict) -> dict:
     t = samples["targets"]
-    return {
+    out = {
         "buttons": t["buttons"][:, 0],
         "stick": t["stick"][:, 0],
         "stick_bin": t["stick"][:, 0],
         "cstick_bin": t["cstick"][:, 0],
         "trigger": t["trigger"][:, 0],
     }
+    if "stick_mag" in t:
+        out["stick_mag"] = t["stick_mag"][:, 0]
+    return out
 
 
 def _apply_threads(threads: int, batch: int) -> int:
@@ -1331,7 +1464,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     mean, std = norm_stats(train_samples["windows"])
     ds = WindowDataset(train_samples, mean, std)
     if cfg.transition_weight and float(cfg.transition_weight) != 1.0:
-        mask = transition_mask(train_samples)
+        mask = transition_mask(train_samples, cfg.stick_mode)
         w = np.where(mask, float(cfg.transition_weight), 1.0)
         sampler = WeightedRandomSampler(torch.as_tensor(w, dtype=torch.double),
                                         num_samples=len(w), replacement=True)
@@ -1383,7 +1516,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
                               cfg, device, batch)
         vpred = collect_predictions(model, val_samples, mean, std, device, batch)
         vmet = compute_metrics(vpred, first_actions(val_samples), None,
-                               prev=val_samples["prev"])
+                               prev=val_samples["prev"], mode=cfg.stick_mode)
         f1_act = float(vmet["mean_f1_active"])
         f1_chg = float(vmet.get("change_mean_f1_active", 0.0))
         score = {"loss": -val_loss, "f1_active": f1_act,
@@ -1429,16 +1562,18 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     metrics = {
         "train": compute_metrics(
             collect_predictions(model, train_samples, mean, std, device, batch),
-            first_actions(train_samples), thresholds, prev=train_samples["prev"]),
+            first_actions(train_samples), thresholds, prev=train_samples["prev"],
+            mode=cfg.stick_mode),
         "val": compute_metrics(val_pred, first_actions(val_samples), thresholds,
-                               prev=val_samples["prev"]),
+                               prev=val_samples["prev"], mode=cfg.stick_mode),
         "test": compute_metrics(
             collect_predictions(model, test_samples, mean, std, device, batch),
-            first_actions(test_samples), thresholds, prev=test_samples["prev"]),
+            first_actions(test_samples), thresholds, prev=test_samples["prev"],
+            mode=cfg.stick_mode),
         "baseline": {
-            "train": copy_last_metrics(train_samples),
-            "val": copy_last_metrics(val_samples),
-            "test": copy_last_metrics(test_samples),
+            "train": copy_last_metrics(train_samples, cfg.stick_mode),
+            "val": copy_last_metrics(val_samples, cfg.stick_mode),
+            "test": copy_last_metrics(test_samples, cfg.stick_mode),
         },
         "history": history,
         "expert_stats": dataset_action_stats(train_samples),
@@ -1668,6 +1803,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ego-swap", action="store_true",
                     help="also train from the opponent's seat (blocks swapped, "
                          "actions from the other player): 2x more data")
+    ap.add_argument("--stick-mode", choices=("dir", "grid"), default="dir",
+                    help="dir = 9 directions + 3 magnitudes (the expert stick is "
+                         "binary); grid = the old 9x9 heatmap")
     ap.add_argument("--transition-weight", type=float, default=1.0,
                     help="sampling weight for decisions that differ from the "
                          "previous action (1.0 = off)")
@@ -1695,6 +1833,7 @@ def main(argv: list[str] | None = None) -> int:
                    frame_skip=args.frame_skip, hidden=args.hidden,
                    cstick=args.cstick, player=args.player,
                    ego_swap=bool(args.ego_swap),
+                   stick_mode=args.stick_mode,
                    transition_weight=float(args.transition_weight),
                    obs_normalize=args.obs_normalize, dropout=args.dropout,
                    shield_from_status=not args.no_shield_from_status)
