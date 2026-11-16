@@ -19,6 +19,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 import numpy as np
@@ -617,6 +618,25 @@ class CheckpointRoundTripTest(unittest.TestCase):
         self.assertEqual(arr.shape, (16,))
         d = bc.action_to_env(actions[0], "dict")
         self.assertEqual(set(d), {"buttons", "stick", "cstick", "trigger"})
+
+    def test_warm_start_keeps_the_prior_weights(self):
+        """--init-from must continue from the checkpoint, not random init."""
+        out = os.path.join(self.tmp.name, "warm.pt")
+        prior = torch.load(self.out, map_location="cpu", weights_only=False)
+        ckpt, metrics = bc.train(
+            self.data, out, cfg=self.cfg, epochs=1, batch=8, seed=0,
+            lr=0.0, mirror=False, init_from=self.out, log=lambda *a: None)
+        for key, value in prior["state_dict"].items():
+            torch.testing.assert_close(ckpt["state_dict"][key], value)
+        self.assertEqual(ckpt["training"]["init_from"], os.path.abspath(self.out))
+        self.assertGreater(metrics["epochs_run"], 0)
+
+    def test_warm_start_rejects_a_different_architecture(self):
+        other = replace(self.cfg, hidden=16)
+        with self.assertRaises(ValueError):
+            bc.train(self.data, os.path.join(self.tmp.name, "bad.pt"),
+                     cfg=other, epochs=1, batch=8, seed=0, mirror=False,
+                     init_from=self.out, log=lambda *a: None)
 
     def test_early_stopping_restores_best_weights(self):
         """A rising validation curve must stop early and save the best epoch."""

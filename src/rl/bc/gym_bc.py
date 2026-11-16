@@ -1375,6 +1375,7 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
           limit: int | None = None, threads: int = 0,
           weight_decay: float = 1e-4, dropout: float | None = None,
           patience: int = 5, min_epochs: int = 1,
+          init_from: str | None = None,
           log=print) -> tuple[dict, dict]:
     """Train from a recording directory; returns ``(checkpoint, metrics)``.
 
@@ -1388,7 +1389,8 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
                       device=device, seed=seed, mirror=mirror,
                       ego_swap=ego_swap, select=select, limit=limit,
                       weight_decay=weight_decay, dropout=dropout,
-                      patience=patience, min_epochs=min_epochs, log=log)
+                      patience=patience, min_epochs=min_epochs,
+                      init_from=init_from, log=log)
     finally:
         torch.set_num_threads(old)
 
@@ -1399,7 +1401,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
            ego_swap: bool = False, select: str = "loss",
            limit: int | None = None, weight_decay: float = 1e-4,
            dropout: float | None = None, patience: int = 5,
-           min_epochs: int = 1,
+           min_epochs: int = 1, init_from: str | None = None,
            log=print) -> tuple[dict, dict]:
     cfg = cfg or BCConfig()
     if dropout is not None:
@@ -1479,6 +1481,18 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         compute_pos_weight(train_samples["targets"]["buttons"]),
         dtype=torch.float32, device=device)
     model = BCPolicyNet(cfg).to(device)
+    if init_from:
+        prior = load_checkpoint(init_from)
+        try:
+            model.load_state_dict(prior["state_dict"], strict=True)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"cannot warm start from {init_from}: its architecture does not "
+                f"match this config ({exc})") from exc
+        log(f"[bc] warm start from {init_from} "
+            f"(best epoch {prior.get('best_epoch')}, "
+            f"{sum(p.numel() for p in model.parameters())} params, "
+            f"lr {lr:g})")
     opt = torch.optim.AdamW(model.parameters(), lr=lr,
                             weight_decay=float(weight_decay))
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
@@ -1625,6 +1639,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
             "dropout": float(cfg.dropout),
             "lr": float(lr),
             "batch": int(batch),
+            "init_from": os.path.abspath(init_from) if init_from else None,
         },
         "meta": {
             "data": os.path.abspath(data_dir),
@@ -1813,6 +1828,10 @@ def main(argv: list[str] | None = None) -> int:
                     default="loss",
                     help="model selection / early stopping metric on validation "
                          "(loss, active-button F1, or change-point F1)")
+    ap.add_argument("--init-from", default=None,
+                    help="warm start from an existing checkpoint (same "
+                         "architecture) instead of random init; use with a "
+                         "smaller --lr to keep training on new data")
     ap.add_argument("--patience", type=int, default=5,
                     help="early-stop after N epochs without val improvement "
                          "(0 disables)")
@@ -1868,7 +1887,8 @@ def main(argv: list[str] | None = None) -> int:
                           limit=args.limit_episodes, threads=args.threads,
                           weight_decay=args.weight_decay,
                           dropout=args.dropout, patience=args.patience,
-                          min_epochs=args.min_epochs, log=log)
+                          min_epochs=args.min_epochs,
+                          init_from=args.init_from, log=log)
     summary = {
         "checkpoint": os.path.abspath(args.out),
         "best_epoch": metrics["best_epoch"],
