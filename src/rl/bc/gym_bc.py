@@ -553,6 +553,57 @@ def prev_action_vectors(acts: dict, include_cstick: bool,
     return np.vstack([np.zeros((1, vec.shape[1]), np.float32), vec[:-1]])
 
 
+def decision_rewards(ep: "EpisodeData", scale: float = 0.01,
+                     ego: int | None = None) -> np.ndarray:
+    """Damage differential per decision, vectorised off ``ep.raw``.
+
+    ``scale * (damage dealt - damage taken)``: a KO resets damage to 0, so the
+    clamp at 0 stops it counting as healing.  Stock/KO/win terms are off by
+    design — with 255-stock recordings they never fire, and damage is the
+    progress signal we want ("damage is stocks").
+
+    This is the offline twin of ``rl.env.gym_reward.compute_reward`` with the
+    same weights; ``test_rewards_match_gym_reward`` pins them together.
+    """
+    dmg = np.asarray(ep.raw, np.float32)[:, :, FIELD_INDEX["damage"]]
+    d = np.diff(np.vstack([dmg[:1], dmg]), axis=0)
+    ego = int(ep.player if ego is None else ego)
+    opp = 1 - ego
+    dealt = np.clip(d[:, opp], 0.0, None)
+    taken = np.clip(d[:, ego], 0.0, None)
+    return (float(scale) * (dealt - taken)).astype(np.float32)
+
+
+def return_to_go(rewards: np.ndarray, gamma: float = 0.995) -> np.ndarray:
+    """Discounted return from each decision to the end of the episode."""
+    g = np.zeros(len(rewards), np.float32)
+    acc = 0.0
+    for i in range(len(rewards) - 1, -1, -1):
+        acc = float(rewards[i]) + float(gamma) * acc
+        g[i] = acc
+    return g
+
+
+def return_weights(rewards: np.ndarray, gamma: float = 0.995, beta: float = 4.0,
+                   quantile: float = 0.5, w_min: float = 0.1,
+                   w_max: float = 10.0) -> np.ndarray:
+    """Conservative return weighting for behaviour cloning.
+
+    ``w = clip(exp(beta * (G - quantile(G))), w_min, w_max)``, normalised to
+    mean 1.  The quantile baseline (instead of the mean) and the clip are what
+    make it conservative: a handful of lucky decisions cannot dominate the
+    gradient, and no sample is dropped entirely.
+    """
+    if len(rewards) == 0:
+        return np.zeros(0, np.float32)
+    g = return_to_go(rewards, gamma)
+    base = float(np.quantile(g, float(quantile)))
+    w = np.exp(float(beta) * (g - base))
+    w = np.clip(w, float(w_min), float(w_max))
+    mean = float(w.mean())
+    return (w / mean if mean > 0 else w).astype(np.float32)
+
+
 def _empty_targets(horizon: int, stick_mode: str) -> dict:
     t = {"buttons": np.zeros((0, horizon, N_BUTTONS), np.float32),
          "stick": np.zeros((0, horizon), np.int64),
@@ -565,7 +616,8 @@ def _empty_targets(horizon: int, stick_mode: str) -> dict:
 
 def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
                    horizon: int = 4, include_cstick: bool = False,
-                   include_trigger: bool = True, stick_mode: str = "grid") -> dict:
+                   include_trigger: bool = True, stick_mode: str = "grid",
+                   frame_weights: np.ndarray | None = None) -> dict:
     """Build aligned samples for one episode (never crosses an episode).
 
     Window at decision ``t`` = observations ``t-window+1 .. t``; previous
@@ -577,10 +629,13 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
     count = n - window - horizon + 2
     if count <= 0:
         empty = np.zeros((0, window, obs.shape[1]), np.float32)
-        return {"windows": empty,
-                "prev": np.zeros((0, 12 + 2 + (2 if include_cstick else 0) +
-                                  (1 if include_trigger else 0)), np.float32),
-                "targets": _empty_targets(horizon, stick_mode)}
+        out = {"windows": empty,
+               "prev": np.zeros((0, 12 + 2 + (2 if include_cstick else 0) +
+                                 (1 if include_trigger else 0)), np.float32),
+               "targets": _empty_targets(horizon, stick_mode)}
+        if frame_weights is not None:
+            out["weights"] = np.zeros(0, np.float32)
+        return out
     t = np.arange(window - 1, n - horizon + 1)
     windows = np.stack([obs[i - window + 1:i + 1] for i in t]).astype(np.float32)
     prev = prev_action_vectors(acts, include_cstick, include_trigger)[t]
@@ -595,17 +650,21 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
         targets["stick_mag"] = np.stack([m[i:i + horizon] for i in t])
     else:
         targets["stick"] = np.stack([stick_to_bin(acts["stick"][i:i + horizon]) for i in t])
-    return {
+    out = {
         "windows": windows,
         "prev": prev.astype(np.float32),
         "targets": targets,
     }
+    if frame_weights is not None:
+        # the weight of the decision being predicted, i.e. the first target
+        out["weights"] = np.asarray(frame_weights, np.float32)[t]
+    return out
 
 
 def concat_samples(parts: list[dict]) -> dict:
     if not parts:
         raise ValueError("no sample parts")
-    return {
+    out = {
         "windows": np.concatenate([p["windows"] for p in parts], axis=0),
         "prev": np.concatenate([p["prev"] for p in parts], axis=0),
         "targets": {
@@ -613,6 +672,9 @@ def concat_samples(parts: list[dict]) -> dict:
             for key in parts[0]["targets"]
         },
     }
+    if "weights" in parts[0]:
+        out["weights"] = np.concatenate([p["weights"] for p in parts], axis=0)
+    return out
 
 
 def ego_swap_obs(obs: np.ndarray) -> np.ndarray:
@@ -648,21 +710,35 @@ def mirror_episode(ep: EpisodeData) -> EpisodeData:
 
 
 def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
-                mirror: bool = False, ego_swap: bool = False) -> dict:
+                mirror: bool = False, ego_swap: bool = False,
+                return_beta: float = 0.0, return_gamma: float = 0.995,
+                weight_quantile: float = 0.5, weight_min: float = 0.1,
+                weight_max: float = 10.0,
+                reward_scale: float = 0.01) -> dict:
+    """Windows for these episodes; with ``return_beta > 0`` each sample also
+    carries a conservative return weight (see :func:`return_weights`)."""
     parts = []
     for ep in episodes:
         variants = [ep]
         if ego_swap:
             variants.append(ego_swap_episode(ep))
         for v in variants:
+            fw = None
+            if return_beta > 0:
+                fw = return_weights(decision_rewards(v, reward_scale),
+                                    gamma=return_gamma, beta=return_beta,
+                                    quantile=weight_quantile, w_min=weight_min,
+                                    w_max=weight_max)
             parts.append(window_samples(v.obs, v.acts, cfg.window, cfg.horizon,
                                         cfg.cstick, cfg.trigger,
-                                        stick_mode=cfg.stick_mode))
+                                        stick_mode=cfg.stick_mode,
+                                        frame_weights=fw))
             if mirror:
                 mv = mirror_episode(v)
                 parts.append(window_samples(mv.obs, mv.acts, cfg.window,
                                             cfg.horizon, cfg.cstick, cfg.trigger,
-                                            stick_mode=cfg.stick_mode))
+                                            stick_mode=cfg.stick_mode,
+                                            frame_weights=fw))
     return concat_samples(parts)
 
 
@@ -847,6 +923,8 @@ class WindowDataset(Dataset):
         self.windows = samples["windows"]      # the only copy
         self.prev = samples["prev"].astype(np.float32)
         self.targets = samples["targets"]
+        w = samples.get("weights")
+        self.weights = None if w is None else np.asarray(w, np.float32)
         self.mean = np.asarray(mean, np.float32)
         self.std = np.asarray(std, np.float32)
 
@@ -858,8 +936,12 @@ class WindowDataset(Dataset):
         targets = {k: torch.from_numpy(v[i]) for k, v in self.targets.items()}
         window = ((self.windows[i] - self.mean) / self.std).astype(np.float32,
                                                                   copy=False)
-        return (torch.from_numpy(window),
-                torch.from_numpy(self.prev[i]), targets)
+        w = 1.0 if self.weights is None else float(self.weights[i])
+        return (torch.from_numpy(window), torch.from_numpy(self.prev[i]),
+                targets, torch.tensor(w))
+
+    def __len__(self) -> int:
+        return len(self.windows)
 
 
 def compute_pos_weight(buttons: np.ndarray, max_weight: float = 20.0) -> np.ndarray:
@@ -1260,15 +1342,30 @@ def compute_metrics(pred: dict, target: dict,
 # ---------------------------------------------------------------------------
 # training
 # ---------------------------------------------------------------------------
+def _weighted_mean(values: torch.Tensor, weights: torch.Tensor | None) -> torch.Tensor:
+    """Mean over the sample axis, weighted when weights are given."""
+    per_sample = values.reshape(values.shape[0], -1).mean(dim=1)
+    if weights is None:
+        return per_sample.mean()
+    w = weights.reshape(-1).to(per_sample.dtype)
+    return (per_sample * w).sum() / w.sum().clamp_min(1e-8)
+
+
 def _loss(out: dict, targets: dict, pos_weight: torch.Tensor,
-          cfg: BCConfig) -> tuple[torch.Tensor, dict]:
-    loss_btn = F.binary_cross_entropy_with_logits(
-        out["buttons"], targets["buttons"], pos_weight=pos_weight)
+          cfg: BCConfig, weights: torch.Tensor | None = None) -> tuple[torch.Tensor, dict]:
+    btn = F.binary_cross_entropy_with_logits(
+        out["buttons"], targets["buttons"], pos_weight=pos_weight,
+        reduction="none")
+    loss_btn = _weighted_mean(btn, weights)
     if cfg.stick_mode == "dir":
-        loss_stick = F.cross_entropy(out["stick"].reshape(-1, STICK_DIRS),
-                                     targets["stick"].reshape(-1))
-        loss_mag = F.cross_entropy(out["stick_mag"].reshape(-1, STICK_MAGS),
-                                   targets["stick_mag"].reshape(-1))
+        stick_el = F.cross_entropy(out["stick"].reshape(-1, STICK_DIRS),
+                                   targets["stick"].reshape(-1),
+                                   reduction="none").reshape(out["stick"].shape[:2])
+        mag_el = F.cross_entropy(out["stick_mag"].reshape(-1, STICK_MAGS),
+                                 targets["stick_mag"].reshape(-1),
+                                 reduction="none").reshape(out["stick_mag"].shape[:2])
+        loss_stick = _weighted_mean(stick_el, weights)
+        loss_mag = _weighted_mean(mag_el, weights)
         loss = loss_btn + loss_stick + 0.5 * loss_mag
         parts = {"buttons": float(loss_btn.detach()),
                  "stick": float(loss_stick.detach()),
@@ -1302,7 +1399,7 @@ def collect_predictions(model: BCPolicyNet, samples: dict, mean, std,
     mode = model.cfg.stick_mode
     bp, sb, cb, tr, sl, sm = [], [], [], [], [], []
     with torch.no_grad():
-        for obs, prev, targets in loader:
+        for obs, prev, targets, _w in loader:
             obs = obs.to(device)
             prev = prev.to(device)
             out = model(obs, prev)
@@ -1408,7 +1505,10 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
           limit: int | None = None, threads: int = 0,
           weight_decay: float = 1e-4, dropout: float | None = None,
           patience: int = 5, min_epochs: int = 1,
-          init_from: str | None = None,
+          init_from: str | None = None, return_beta: float = 0.0,
+          return_gamma: float = 0.995, weight_quantile: float = 0.5,
+          weight_min: float = 0.1, weight_max: float = 10.0,
+          reward_scale: float = 0.01,
           log=print) -> tuple[dict, dict]:
     """Train from a recording directory; returns ``(checkpoint, metrics)``.
 
@@ -1423,7 +1523,11 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
                       ego_swap=ego_swap, select=select, limit=limit,
                       weight_decay=weight_decay, dropout=dropout,
                       patience=patience, min_epochs=min_epochs,
-                      init_from=init_from, log=log)
+                      init_from=init_from, return_beta=return_beta,
+                      return_gamma=return_gamma,
+                      weight_quantile=weight_quantile, weight_min=weight_min,
+                      weight_max=weight_max, reward_scale=reward_scale,
+                      log=log)
     finally:
         torch.set_num_threads(old)
 
@@ -1435,6 +1539,9 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
            limit: int | None = None, weight_decay: float = 1e-4,
            dropout: float | None = None, patience: int = 5,
            min_epochs: int = 1, init_from: str | None = None,
+           return_beta: float = 0.0, return_gamma: float = 0.995,
+           weight_quantile: float = 0.5, weight_min: float = 0.1,
+           weight_max: float = 10.0, reward_scale: float = 0.01,
            log=print) -> tuple[dict, dict]:
     cfg = cfg or BCConfig()
     if dropout is not None:
@@ -1489,10 +1596,21 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         log(f"[bc] shield-from-status OFF: {shield_labels['total']['frames']} "
             "guard decisions keep their raw mask")
 
+    weighted = dict(return_beta=return_beta, return_gamma=return_gamma,
+                    weight_quantile=weight_quantile, weight_min=weight_min,
+                    weight_max=weight_max, reward_scale=reward_scale)
     train_samples = samples_for(train_eps, cfg, mirror=mirror,
-                                ego_swap=ego_swap)
-    val_samples = samples_for(val_eps, cfg, mirror=False)
-    test_samples = samples_for(test_eps, cfg, mirror=False)
+                                ego_swap=ego_swap, **weighted)
+    if return_beta > 0 and "weights" in train_samples:
+        w = np.asarray(train_samples["weights"], np.float32)
+        log(f"[bc] conservative return weighting: beta {return_beta:g}, gamma "
+            f"{return_gamma:g}, quantile {weight_quantile:g}, clip "
+            f"[{weight_min:g}, {weight_max:g}] -> weight mean {w.mean():.3f} "
+            f"p10 {np.percentile(w, 10):.3f} p90 {np.percentile(w, 90):.3f} "
+            f"max {w.max():.3f}")
+
+    val_samples = samples_for(val_eps, cfg, mirror=False, **weighted)
+    test_samples = samples_for(test_eps, cfg, mirror=False, **weighted)
     log(f"[bc] samples: train {len(train_samples['windows'])}, "
         f"val {len(val_samples['windows'])}, test {len(test_samples['windows'])}")
 
@@ -1544,12 +1662,13 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         model.train()
         total = 0.0
         seen = 0
-        for obs, prev, targets in loader:
+        for obs, prev, targets, w in loader:
             obs = obs.to(device)
             prev = prev.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
+            w = w.to(device)
             pred = model(obs, prev)
-            loss, parts = _loss(pred, targets, pos_weight, cfg)
+            loss, parts = _loss(pred, targets, pos_weight, cfg, weights=w)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -1673,6 +1792,11 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
             "lr": float(lr),
             "batch": int(batch),
             "init_from": os.path.abspath(init_from) if init_from else None,
+            "return_beta": float(return_beta),
+            "return_gamma": float(return_gamma),
+            "weight_quantile": float(weight_quantile),
+            "weight_clip": [float(weight_min), float(weight_max)],
+            "reward_scale": float(reward_scale),
         },
         "meta": {
             "data": os.path.abspath(data_dir),
@@ -1702,12 +1826,12 @@ def _eval_loss(model, samples, mean, std, pos_weight, cfg, device,
     total = 0.0
     seen = 0
     with torch.no_grad():
-        for obs, prev, targets in loader:
+        for obs, prev, targets, w in loader:
             obs = obs.to(device)
             prev = prev.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
             out = model(obs, prev)
-            loss, _ = _loss(out, targets, pos_weight, cfg)
+            loss, _ = _loss(out, targets, pos_weight, cfg, weights=w.to(device))
             total += float(loss) * len(obs)
             seen += len(obs)
     return total / max(1, seen)
@@ -1787,12 +1911,12 @@ def _train_overfit(cfg: BCConfig, steps: int, seed: int, device: str,
         dtype=torch.float32, device=device)
     for step in range(1, steps + 1):
         model.train()
-        for obs, prev, targets in loader:
+        for obs, prev, targets, w in loader:
             obs = obs.to(device)
             prev = prev.to(device)
             targets = {k: v.to(device) for k, v in targets.items()}
             out = model(obs, prev)
-            loss, _ = _loss(out, targets, pos_weight, cfg)
+            loss, _ = _loss(out, targets, pos_weight, cfg, weights=w.to(device))
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -1862,6 +1986,17 @@ def main(argv: list[str] | None = None) -> int:
                     default="loss",
                     help="model selection / early stopping metric on validation "
                          "(loss, active-button F1, or change-point F1)")
+    ap.add_argument("--return-weight", type=float, default=0.0,
+                    help="conservative return weighting: beta on the discounted "
+                         "damage-differential return (0 = plain BC)")
+    ap.add_argument("--return-gamma", type=float, default=0.995,
+                    help="discount per decision for the return weighting")
+    ap.add_argument("--weight-quantile", type=float, default=0.5,
+                    help="quantile of the return used as the weight baseline")
+    ap.add_argument("--weight-clip", type=float, nargs=2, default=(0.1, 10.0),
+                    metavar=("MIN", "MAX"), help="clip on the per-sample weight")
+    ap.add_argument("--reward-scale", type=float, default=0.01,
+                    help="reward units per percent of damage")
     ap.add_argument("--init-from", default=None,
                     help="warm start from an existing checkpoint (same "
                          "architecture) instead of random init; use with a "
@@ -1922,7 +2057,13 @@ def main(argv: list[str] | None = None) -> int:
                           weight_decay=args.weight_decay,
                           dropout=args.dropout, patience=args.patience,
                           min_epochs=args.min_epochs,
-                          init_from=args.init_from, log=log)
+                          init_from=args.init_from,
+                          return_beta=args.return_weight,
+                          return_gamma=args.return_gamma,
+                          weight_quantile=args.weight_quantile,
+                          weight_min=args.weight_clip[0],
+                          weight_max=args.weight_clip[1],
+                          reward_scale=args.reward_scale, log=log)
     summary = {
         "checkpoint": os.path.abspath(args.out),
         "best_epoch": metrics["best_epoch"],
@@ -1942,6 +2083,7 @@ def main(argv: list[str] | None = None) -> int:
         "test": metrics["test"],
         "baseline": metrics["baseline"],
         "select": metrics["select"],
+        "return_beta": args.return_weight,
         "expert_stats": metrics["expert_stats"],
         "split": metrics["split"],
         "alignment": metrics["alignment"],

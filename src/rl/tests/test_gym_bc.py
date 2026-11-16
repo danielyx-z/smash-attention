@@ -235,6 +235,69 @@ def _untrained_policy(sample: bool):
     return bc.BCPolicy(checkpoint, sample=sample)
 
 
+class ReturnWeightTest(unittest.TestCase):
+    """Conservative return weighting (damage differential only)."""
+
+    def test_rewards_match_gym_reward(self):
+        from rl.env import gym_reward
+        ep = bc.synthetic_episode(40, seed=2)
+        cfg = gym_reward.RewardConfig(damage_scale=0.01, ko_bonus=0.0,
+                                      stock_loss=0.0, win_bonus=0.0,
+                                      loss_penalty=0.0, draw_reward=0.0,
+                                      ego_slot=ep.player)
+        names = bc.FIELDS
+        prev = None
+        expected = []
+        for t in range(len(ep.raw)):
+            cur = {"fight_on": 1,
+                   "fighters": [{n: float(ep.raw[t, i, bc.FIELD_INDEX[n]])
+                                 for n in names} for i in range(2)]}
+            expected.append(gym_reward.compute_reward(prev, cur, cfg))
+            prev = cur
+        got = bc.decision_rewards(ep, 0.01)
+        np.testing.assert_allclose(got, np.asarray(expected, np.float32),
+                                   rtol=1e-5, atol=1e-6)
+
+    def test_weights_are_bounded_and_favour_returns(self):
+        rewards = np.array([0.0, 0.3, 0.0, 0.0, -0.2, 0.3], np.float32)
+        w = bc.return_weights(rewards, gamma=0.99, beta=4.0, quantile=0.5,
+                              w_min=0.1, w_max=10.0)
+        self.assertEqual(w.shape, rewards.shape)
+        self.assertAlmostEqual(float(w.mean()), 1.0, places=5)
+        self.assertGreaterEqual(float(w.min()), 0.1 - 1e-6)
+        self.assertLessEqual(float(w.max()), 10.0 + 1e-6)
+        self.assertGreater(float(w[1]), float(w[4]))   # +damage beats -damage
+
+    def test_empty_weights(self):
+        self.assertEqual(len(bc.return_weights(np.zeros(0, np.float32))), 0)
+
+    def test_samples_carry_aligned_weights(self):
+        cfg = bc.BCConfig(window=4, horizon=2)
+        ep = bc.synthetic_episode(60, seed=1)
+        plain = bc.samples_for([ep], cfg)
+        weighted = bc.samples_for([ep], cfg, return_beta=5.0)
+        self.assertNotIn("weights", plain)
+        self.assertEqual(weighted["weights"].shape, (len(weighted["windows"]),))
+        self.assertAlmostEqual(float(weighted["weights"].mean()), 1.0, places=4)
+
+    def test_equal_weights_match_the_unweighted_loss(self):
+        cfg = bc.BCConfig(window=4, horizon=2, hidden=8)
+        net = bc.BCPolicyNet(cfg)
+        obs = torch.randn(3, cfg.window, cfg.obs_dim)
+        prev = torch.zeros(3, cfg.prev_dim)
+        targets = {"buttons": torch.zeros(3, cfg.horizon, bc.N_BUTTONS),
+                   "stick": torch.zeros(3, cfg.horizon, dtype=torch.long),
+                   "stick_mag": torch.zeros(3, cfg.horizon, dtype=torch.long),
+                   "cstick": torch.zeros(3, cfg.horizon, dtype=torch.long),
+                   "trigger": torch.zeros(3, cfg.horizon)}
+        pos = torch.ones(bc.N_BUTTONS)
+        out = net(obs, prev)
+        plain, _ = bc._loss(out, targets, pos, cfg)
+        ones, _ = bc._loss(out, targets, pos, cfg, weights=torch.ones(3))
+        self.assertAlmostEqual(float(plain.detach()), float(ones.detach()),
+                               places=5)
+
+
 class SamplingDecodeTest(unittest.TestCase):
     """--sample: stochastic decoding must still produce valid, varied actions."""
 
@@ -483,7 +546,8 @@ class NormalizationTest(unittest.TestCase):
         mean, std = bc.norm_stats(samples["windows"])
         ds = bc.WindowDataset(samples, mean, std)
         self.assertIs(ds.windows, samples["windows"])   # no second copy
-        w, p, t = ds[0]
+        w, p, t, wt = ds[0]
+        self.assertEqual(float(wt), 1.0)               # unweighted -> 1
         expected = (samples["windows"][0] - mean) / std
         np.testing.assert_allclose(w.numpy(), expected, rtol=1e-5, atol=1e-5)
         self.assertEqual(tuple(p.shape), (15,))
