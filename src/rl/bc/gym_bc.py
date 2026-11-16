@@ -246,9 +246,14 @@ def stick_to_dir(v):
     v = np.asarray(v, np.float32)
     x, y = v[..., 0], v[..., 1]
     m = np.hypot(x, y)
+    x = np.where(np.isfinite(x), x, 0.0)
+    y = np.where(np.isfinite(y), y, 0.0)
     ang = np.degrees(np.arctan2(y, x))
-    sector = np.floor(((ang + 22.5) % 360.0) / 45.0).astype(np.int64)
-    neutral = m < STICK_NEUTRAL
+    # the +22.5 offset can land on exactly 360 for a boundary angle; clamp the
+    # sector so the direction stays inside 0..8
+    sector = np.clip(np.floor(((ang + 22.5) % 360.0) / 45.0).astype(np.int64),
+                     0, 7)
+    neutral = np.hypot(x, y) < STICK_NEUTRAL
     d = np.where(neutral, 0, sector + 1).astype(np.int64)
     mag = np.where(neutral, 0, np.where(m >= STICK_FULL, 2, 1)).astype(np.int64)
     return d, mag
@@ -840,13 +845,8 @@ class WindowDataset(Dataset):
         return len(self.windows)
 
     def __getitem__(self, i: int):
-        targets = {
-            "buttons": torch.from_numpy(self.targets["buttons"][i]),
-            "stick": torch.from_numpy(self.targets["stick"][i]),
-            "trigger": torch.from_numpy(self.targets["trigger"][i]),
-        }
-        if "cstick" in self.targets:
-            targets["cstick"] = torch.from_numpy(self.targets["cstick"][i])
+        # every target key travels (stick_mag exists in the direction stick mode)
+        targets = {k: torch.from_numpy(v[i]) for k, v in self.targets.items()}
         return (torch.from_numpy(self.windows[i]),
                 torch.from_numpy(self.prev[i]), targets)
 
