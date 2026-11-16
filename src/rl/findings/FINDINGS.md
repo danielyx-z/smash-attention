@@ -1619,3 +1619,30 @@ The offline numbers are not the problem: test `f1_change` 0.695-0.711,
 `f1_active` 0.61-0.70, stick direction 0.85. They are measured on the expert's
 own state distribution, which is exactly the distribution the closed loop
 leaves.
+
+### Conservative return weighting (damage differential) beats plain BC closed loop
+
+Reward: `0.01 * (damage dealt - damage taken)` per decision, the offline twin of
+`gym_reward.compute_reward` with the stock/KO/win terms off (255-stock
+recordings never KO, and damage already encodes progress towards a stock).
+Weight: `clip(exp(4 * (G - median G)), 0.1, 10)`, mean-normalised, `G` the
+discounted (gamma 0.995) return to the end of the episode; measured distribution
+mean 1.000, p10 0.385, p90 1.804, max 6.836.
+
+30 Hz, `--sample --execute 1 --no-blend`, 900 decisions = 1800 frames per
+episode, DK vs DK CPU 9:
+
+| model | data | damage dealt | damage taken | differential | stick neutral |
+|---|---|---|---|---|---|
+| plain BC | 200 eps | 31.5, 17.1, 30.2 (26.3) | 35.3, 148.9, 110.3 (98.2) | -71.9 | 0.616 |
+| conservative return-weighted | 100 eps | 25.1, 0.0, 20.2 (15.1) | 74.3, 12.9, 45.4 (44.2) | -29.1 | 0.518 |
+
+The weighted model loses far less damage and moves more (stick neutral 0.52 vs
+0.62) — and it did that with **half the episodes**, because the 1.7M-sample run
+was OOM-killed on a machine that was also running 6.8 GB of other work. Offline
+it is also better on its own split (test f1_active 0.780, f1_change 0.743,
+stick MAE 0.076).
+
+Caveats: 3 episodes each, and episode-to-episode variance is large (one plain
+episode took 149 %), so this is a direction, not a measurement. The two models
+also saw different data volumes.
