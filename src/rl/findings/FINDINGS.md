@@ -1667,3 +1667,22 @@ That is consistent ("damage is the currency"), but it is a modelling choice wort
 stating: a KO is worth no more than the damage that preceded it, and losing a
 stock costs nothing beyond the damage taken.  `gym_reward.RewardConfig` already
 has `ko_bonus` / `stock_loss` for the alternative; the trainer passes 0 for both.
+
+### Building the recomp: never interrupt the link
+
+Killing `setup.py --from compile` mid-way left `ssbu_game_eh_o1.so` truncated
+(5.8 MB instead of 580 MB), because the compile step links the game library
+in place.  A relink of the host runtime against the Nov-14 backup `.so` produced
+an exe that booted, joined the pad, and then ignored all input — the host runtime
+and the game library have to come from one build.
+
+Two practical notes:
+
+* `setup.py --only link` rebuilds the host runtime and relinks in about 90 s
+  (deps, stage, link): that is the edit-link-run loop for `runtime/*.c`.
+* the compile step recompiles the whole game (1161 files, ~80 min with 6 jobs)
+  unless its done marker is present; 17 files crash LLVM 19 in
+  `MemorySSAUpdater::recursePhi`, and `--no-inline` builds those (objects built
+  earlier keep their own flag, so the result is valid).
+* keep a copy of a known-good `ssbu_native` + `ssbu_game_eh_o1.so` pair outside
+  the tree (`/tmp/opencode/ssbu_backups/`), because there is no atomic replace.
