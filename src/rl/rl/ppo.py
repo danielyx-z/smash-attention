@@ -642,6 +642,7 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "entropy": float(args.entropy),
             "value_coef": float(args.value_coef),
             "kl_coef": float(getattr(args, "kl_coef", 0.0)),
+            "kl_model": getattr(args, "kl_model", None),
             "stock_value": float(getattr(args, "stock_value", 0.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
             "saved_ns": time.time_ns(),
@@ -682,6 +683,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--value-coef", type=float, default=0.5)
     ap.add_argument("--kl-coef", type=float, default=0.0,
                     help="BC-anchored KL penalty coefficient (0 = off)")
+    ap.add_argument("--kl-model", default=None,
+                    help="frozen reference checkpoint for KL (default: the "
+                         "warm-start model)")
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--stock-value", type=float, default=1.0,
                     help="reward units for each lost/earned stock "
@@ -692,6 +696,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="JSON status file for the live viewer overlay")
     ap.add_argument("--cpu-level", type=int, default=0,
                     help="opponent CPU level shown in the overlay")
+    ap.add_argument("--max-dead-episodes", type=int, default=0,
+                    help="stop when a rollout has more than this many episodes "
+                         "with zero damage dealt (default 0: stop immediately)")
     ap.add_argument("--start-menus", action="store_true",
                     help="create the pad and walk boot -> match first")
     ap.add_argument("--game-log", default="~/smash.log")
@@ -714,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
     ppo.check()
     if float(args.stock_value) < 0.0:
         ap.error("--stock-value must be >= 0")
+    if int(args.max_dead_episodes) < 0:
+        ap.error("--max-dead-episodes must be >= 0")
 
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     torch.manual_seed(ppo.seed)
@@ -727,14 +736,23 @@ def main(argv: list[str] | None = None) -> int:
     model.to(device)
     ref_model = None
     if ppo.kl_coef > 0.0:
-        ref_model = copy.deepcopy(model).to(device)
+        if args.kl_model:
+            ref_model, _ref_cfg, ref_vocab, _rmean, _rstd, _ = \
+                load_bc_model(args.kl_model, device, dropout=0.0)
+            if (ref_vocab.size != vocab.size or
+                    not np.array_equal(ref_vocab.keys, vocab.keys)):
+                raise ValueError("--kl-model has a different action vocabulary")
+        else:
+            ref_model = copy.deepcopy(model).to(device)
         ref_model.eval()
         for param in ref_model.parameters():
             param.requires_grad_(False)
+    ref_label = args.kl_model or args.model
     log(f"[ppo] warm start {args.model}: vocab {vocab.size} classes, "
         f"window {cfg.window}, horizon {cfg.horizon}, frame_skip "
         f"{cfg.frame_skip}, damage {cfg.damage_mode}, "
-        f"kl_bc={ppo.kl_coef:g}, stock_value={args.stock_value:g}")
+        f"kl_bc={ppo.kl_coef:g} ({ref_label}), "
+        f"stock_value={args.stock_value:g}")
     stats_writer = TrainingStats(args.stats_file, args.cpu_level,
                                  ppo.iterations)
 
@@ -783,6 +801,18 @@ def main(argv: list[str] | None = None) -> int:
                 int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
                 on_episode=stats_writer.record_episode,
                 on_step=stats_writer.record_step)
+            dead = [e for e in episodes
+                    if float(e.get("p2_damage", 0.0) or 0.0) <= 0.0]
+            if len(dead) > int(args.max_dead_episodes):
+                detail = ", ".join(
+                    f"ep{e.get('length')} taken={e.get('p1_damage')} "
+                    f"dealt={e.get('p2_damage')} deaths P1={e.get('p1_deaths')}"
+                    for e in dead[:4])
+                stats_writer.finish()
+                raise RuntimeError(
+                    f"{len(dead)}/{len(episodes)} episodes dealt no damage "
+                    f"({detail}); the P1 pad/game likely stalled. Stopping "
+                    "before training on dead data.")
             next_values = batch_values(
                 model, batch["next_windows"], batch["next_prevs"],
                 mean, std, device)

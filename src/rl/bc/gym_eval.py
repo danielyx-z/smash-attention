@@ -298,7 +298,10 @@ def _fight_on(env) -> bool:
     if reader is None:
         return False
     try:
-        return bool(reader.read_latest(timeout=1.0).fight_on)
+        snap = reader.read_latest(timeout=1.0)
+        fighters = [f for f in snap.fighters if f.get("kind")]
+        return bool(snap.fight_on and int(snap.match_state) == 1
+                    and len(fighters) >= 2)
     except Exception:
         return False
 
