@@ -87,9 +87,11 @@ class TrainingStatsTest(unittest.TestCase):
             path = os.path.join(tmp, "stats.json")
             stats = ppo.TrainingStats(path, cpu_level=3, iterations=20)
             stats.record_episode({"p1_damage": 40.0, "p2_damage": 50.0,
-                                  "winner": None})
+                                  "winner": None, "p1_deaths": 1,
+                                  "p2_deaths": 0})
             stats.record_episode({"p1_damage": 30.0, "p2_damage": 10.0,
-                                  "winner": 1})
+                                  "winner": 1, "p1_deaths": 0,
+                                  "p2_deaths": 2})
             stats.record_iteration(2, {"policy_loss": -0.1,
                                        "value_loss": 0.01,
                                        "entropy": 1.2,
@@ -101,6 +103,8 @@ class TrainingStatsTest(unittest.TestCase):
             self.assertEqual(data["episodes"], 2)
             self.assertEqual(data["positive"], 1)
             self.assertEqual(data["losses"], 1)
+            self.assertEqual(data["p1_deaths"], 1)
+            self.assertEqual(data["p2_deaths"], 2)
             self.assertAlmostEqual(data["mean_dealt"], 30.0)
             self.assertAlmostEqual(data["mean_diff"], -5.0)
             self.assertAlmostEqual(data["positive_rate"], 0.5)

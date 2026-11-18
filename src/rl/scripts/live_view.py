@@ -742,7 +742,7 @@ class LiveView:
             if not active:
                 state = "idle"
                 colour = DIM
-            elif age > 15.0:
+            elif age > 45.0:
                 state = f"stalled {age:2.0f}s"
                 colour = WARN
             else:
@@ -754,6 +754,8 @@ class LiveView:
             pos = 100.0 * float(data.get("positive_rate", 0.0) or 0.0)
             wins = int(data.get("wins", 0) or 0)
             losses = int(data.get("losses", 0) or 0)
+            p1_deaths = int(data.get("p1_deaths", 0) or 0)
+            p2_deaths = int(data.get("p2_deaths", 0) or 0)
             mean_d = float(data.get("mean_dealt", 0.0) or 0.0)
             mean_t = float(data.get("mean_taken", 0.0) or 0.0)
             mean_diff = float(data.get("mean_diff", 0.0) or 0.0)
@@ -762,7 +764,8 @@ class LiveView:
             its = int(data.get("iterations", 0) or 0)
             text = "\n".join([
                 f"TRAINING {state}   CPU{cpu}   iter {it}/{its}   eps {eps}",
-                f"positive {pos:5.1f}%   wins {wins} / losses {losses}",
+                f"positive {pos:5.1f}%   wins {wins} / losses {losses}   "
+                f"deaths P1 {p1_deaths} / P2 {p2_deaths}",
                 f"dealt {mean_d:6.1f}   taken {mean_t:6.1f}   "
                 f"mean diff {mean_diff:+6.1f}   last {last_diff:+6.1f}",
                 f"PPO loss {float(data.get('policy_loss', 0.0) or 0.0):+.4f}   "

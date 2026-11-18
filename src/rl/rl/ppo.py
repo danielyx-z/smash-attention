@@ -99,6 +99,8 @@ class TrainingStats:
             "wins": 0,
             "losses": 0,
             "positive": 0,
+            "p1_deaths": 0,
+            "p2_deaths": 0,
             "sum_dealt": 0.0,
             "sum_taken": 0.0,
             "sum_diff": 0.0,
@@ -111,6 +113,7 @@ class TrainingStats:
             "kl_bc": 0.0,
             "updated": time.time(),
         }
+        self.last_beat = time.time()
         self.flush()
 
     def _derived(self) -> None:
@@ -135,8 +138,18 @@ class TrainingStats:
         except (OSError, TypeError, ValueError):
             pass
 
+    def record_step(self) -> None:
+        """Heartbeat so a 30 s episode does not look like a stalled run."""
+        now = time.time()
+        if now - self.last_beat >= 2.0:
+            self.last_beat = now
+            self.data["updated"] = now
+            self.flush()
+
     def record_episode(self, row: dict) -> None:
         self.data["episodes"] += 1
+        self.data["p1_deaths"] += int(row.get("p1_deaths", 0) or 0)
+        self.data["p2_deaths"] += int(row.get("p2_deaths", 0) or 0)
         p1, p2 = row.get("p1_damage"), row.get("p2_damage")
         if p1 is not None and p2 is not None:
             dealt, taken = float(p2), float(p1)
@@ -297,9 +310,23 @@ class MockCombatEnv(ge.MockEnv):
         return obs, reward, terminated, truncated, info
 
 
+def _rebirth_flags(info: dict) -> list[bool]:
+    """[P1_on_rebirth, P2_on_rebirth] from an env info dict."""
+    out = []
+    for fighter in (info.get("raw_fighters") or [])[:2]:
+        try:
+            out.append(int(fighter.get("is_on_rebirth", 0) or 0) == 1)
+        except (TypeError, ValueError, AttributeError):
+            out.append(False)
+    while len(out) < 2:
+        out.append(False)
+    return out
+
+
 def _episode_row(info: dict, length: int, ret: float,
                  terminated: bool, truncated: bool,
-                 peak: dict | None = None) -> dict:
+                 peak: dict | None = None,
+                 deaths: dict | None = None) -> dict:
     """Summarize one episode.
 
     The last info frame can be a respawn with damage reset to 0, so the final
@@ -314,15 +341,18 @@ def _episode_row(info: dict, length: int, ret: float,
             p1 = peak["p1_damage"]
         if p2 in (None, 0.0) and peak.get("p2_damage", 0.0) > 0.0:
             p2 = peak["p2_damage"]
+    deaths = deaths or {}
     return {"length": int(length), "return": float(ret),
             "p1_damage": p1, "p2_damage": p2, "winner": winner,
+            "p1_deaths": int(deaths.get("p1", 0)),
+            "p2_deaths": int(deaths.get("p2", 0)),
             "terminated": bool(terminated), "truncated": bool(truncated)}
 
 
 def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     vocab: bc.ActionVocab, mean, std, device: str,
                     steps: int, seed: int,
-                    on_episode=None) -> tuple[dict, list[dict]]:
+                    on_episode=None, on_step=None) -> tuple[dict, list[dict]]:
     """Run the live env, returning flat transition arrays and episode rows."""
     model.eval()
     windows, prevs, actions, logps, values, rewards = [], [], [], [], [], []
@@ -335,6 +365,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     ep_ret = 0.0
     ep_len = 0
     peak = {"p1_damage": 0.0, "p2_damage": 0.0}
+    prev_rebirth = _rebirth_flags(info)
+    deaths = {"p1": 0, "p2": 0}
     while len(rewards) < steps:
         window = state.window().copy()
         prev = state.prev.copy()
@@ -362,9 +394,16 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             value = step_result.get(key)
             if value is not None:
                 peak[key] = max(peak[key], float(value))
+        curr_rebirth = _rebirth_flags(info)
+        for i, key in enumerate(("p1", "p2")):
+            if curr_rebirth[i] and not prev_rebirth[i]:
+                deaths[key] += 1
+        prev_rebirth = curr_rebirth
+        if on_step is not None:
+            on_step()
         if terminated or truncated:
             row = _episode_row(info, ep_len, ep_ret,
-                               terminated, truncated, peak)
+                               terminated, truncated, peak, deaths)
             episodes.append(row)
             if on_episode is not None:
                 on_episode(row)
@@ -375,6 +414,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             ep_ret = 0.0
             ep_len = 0
             peak = {"p1_damage": 0.0, "p2_damage": 0.0}
+            prev_rebirth = _rebirth_flags(info)
+            deaths = {"p1": 0, "p2": 0}
     batch = {
         "windows": np.stack(windows).astype(np.float32),
         "prevs": np.stack(prevs).astype(np.float32),
@@ -664,7 +705,8 @@ def main(argv: list[str] | None = None) -> int:
             batch, episodes = collect_rollout(
                 env, model, state, cfg, vocab, mean, std, device,
                 int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
-                on_episode=stats_writer.record_episode)
+                on_episode=stats_writer.record_episode,
+                on_step=stats_writer.record_step)
             next_values = batch_values(
                 model, batch["next_windows"], batch["next_prevs"],
                 mean, std, device)
