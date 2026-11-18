@@ -48,6 +48,7 @@ from rl.memory.memapi import find_game_pid
 BG = "#0e1116"
 PANEL_BG = "#151a21"
 PANEL_W = 560
+DEFAULT_STATS_FILE = "/tmp/ssbu_training_stats.json"
 FG = "#e6edf3"
 DIM = "#7d8590"
 OK = "#3fb950"
@@ -586,7 +587,8 @@ class LiveView:
     def __init__(self, root, source, *, topmost: bool = True,
                  width: int = 1440, height: int = 860, fps: float = 60.0,
                  panel_hz: float = 12.0, trails: int = 48,
-                 max_objects: int = 32):
+                 max_objects: int = 32,
+                 stats_file: str = DEFAULT_STATS_FILE):
         import tkinter as tk
         self.tk = tk
         self.root = root
@@ -609,6 +611,9 @@ class LiveView:
         self.obj_trails: dict[tuple[int, int], deque] = defaultdict(
             lambda: deque(maxlen=10))
         self.items: dict[str, Any] = {}
+        self.stats_file = os.path.expanduser(stats_file)
+        self.stats_data: dict | None = None
+        self.stats_next = 0.0
 
         root.title("SSBU live view")
         root.geometry(f"{int(width)}x{int(height)}")
@@ -656,7 +661,15 @@ class LiveView:
         self.status = self.canvas.create_text(
             12, 26, anchor="nw", fill=FG, font=("TkFixedFont", 8),
             text="waiting for /dev/shm/ssbu_state.bin ...")
+        self.stats_bg = self.canvas.create_rectangle(
+            0, 0, 0, 0, fill="#0b0f14", outline="#39424e", width=1,
+            state="hidden")
+        self.stats_text = self.canvas.create_text(
+            16, max(200, height) - 16, anchor="sw", fill=DIM,
+            font=("TkFixedFont", 9),
+            text="TRAINING  waiting for stats ...", justify="left")
         self.rebuild()
+        self.update_stats()
         self.root.after(0, self.tick)
 
     # -- controls ------------------------------------------------------
@@ -693,10 +706,81 @@ class LiveView:
         except self.tk.TclError:
             pass
 
+    def _place_stats(self) -> None:
+        c = self.canvas
+        h = max(200, c.winfo_height())
+        try:
+            c.coords(self.stats_text, 16, h - 16)
+            bbox = c.bbox(self.stats_text)
+            if bbox:
+                c.coords(self.stats_bg, bbox[0] - 8, bbox[1] - 6,
+                         bbox[2] + 8, bbox[3] + 6)
+                c.itemconfigure(self.stats_bg, state="normal")
+                c.tag_raise(self.stats_bg)
+                c.tag_raise(self.stats_text)
+            else:
+                c.itemconfigure(self.stats_bg, state="hidden")
+        except self.tk.TclError:
+            pass
+
+    def update_stats(self) -> None:
+        data = None
+        try:
+            with open(self.stats_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            data = None
+        self.stats_data = data
+        now = time.time()
+        if not data:
+            text = "TRAINING  no stats file yet"
+            colour = DIM
+        else:
+            active = bool(data.get("active"))
+            updated = float(data.get("updated", 0.0) or 0.0)
+            age = max(0.0, now - updated) if updated else 999.0
+            if not active:
+                state = "idle"
+                colour = DIM
+            elif age > 15.0:
+                state = f"stalled {age:2.0f}s"
+                colour = WARN
+            else:
+                state = "training"
+                mean_diff = float(data.get("mean_diff", 0.0) or 0.0)
+                colour = OK if mean_diff > 0 else BAD if mean_diff < 0 else FG
+            cpu = data.get("cpu_level") or "?"
+            eps = int(data.get("episodes", 0) or 0)
+            pos = 100.0 * float(data.get("positive_rate", 0.0) or 0.0)
+            wins = int(data.get("wins", 0) or 0)
+            losses = int(data.get("losses", 0) or 0)
+            mean_d = float(data.get("mean_dealt", 0.0) or 0.0)
+            mean_t = float(data.get("mean_taken", 0.0) or 0.0)
+            mean_diff = float(data.get("mean_diff", 0.0) or 0.0)
+            last_diff = float(data.get("last_diff", 0.0) or 0.0)
+            it = int(data.get("iteration", 0) or 0)
+            its = int(data.get("iterations", 0) or 0)
+            text = "\n".join([
+                f"TRAINING {state}   CPU{cpu}   iter {it}/{its}   eps {eps}",
+                f"positive {pos:5.1f}%   wins {wins} / losses {losses}",
+                f"dealt {mean_d:6.1f}   taken {mean_t:6.1f}   "
+                f"mean diff {mean_diff:+6.1f}   last {last_diff:+6.1f}",
+                f"PPO loss {float(data.get('policy_loss', 0.0) or 0.0):+.4f}   "
+                f"value {float(data.get('value_loss', 0.0) or 0.0):.4f}   "
+                f"kl_bc {float(data.get('kl_bc', 0.0) or 0.0):.4f}   "
+                f"ent {float(data.get('entropy', 0.0) or 0.0):.3f}",
+            ])
+        try:
+            self.canvas.itemconfigure(self.stats_text, text=text, fill=colour)
+            self._place_stats()
+        except self.tk.TclError:
+            pass
+
     def rebuild(self) -> None:
         c = self.canvas
+        keep = (self.hint, self.status, self.stats_bg, self.stats_text)
         for item in c.find_all():
-            if item in (self.hint, self.status):
+            if item in keep:
                 continue
             c.delete(item)
         self.items.clear()
@@ -737,9 +821,14 @@ class LiveView:
                           text="FINAL DESTINATION (assumed)")
         c.tag_raise(self.hint)
         c.tag_raise(self.status)
+        self._place_stats()
 
     # -- main loop -----------------------------------------------------
     def tick(self) -> None:
+        now = time.monotonic()
+        if now >= self.stats_next:
+            self.stats_next = now + 0.5
+            self.update_stats()
         if not self.paused:
             try:
                 model = self.source.read()
@@ -1166,6 +1255,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--panel-hz", type=float, default=12.0)
     ap.add_argument("--trails", type=int, default=48)
     ap.add_argument("--max-objects", type=int, default=32)
+    ap.add_argument("--stats-file", default=DEFAULT_STATS_FILE,
+                    help="PPO training status JSON for the bottom-left overlay")
     args = ap.parse_args(argv)
 
     if args.mock:
@@ -1195,7 +1286,8 @@ def main(argv: list[str] | None = None) -> int:
     view = LiveView(root, source, topmost=not args.no_topmost,
                     width=args.width, height=args.height, fps=args.fps,
                     panel_hz=args.panel_hz, trails=args.trails,
-                    max_objects=args.max_objects)
+                    max_objects=args.max_objects,
+                    stats_file=args.stats_file)
     try:
         root.mainloop()
     finally:

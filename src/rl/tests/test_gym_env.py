@@ -527,6 +527,20 @@ class TestReward(unittest.TestCase):
         cfg = gym_reward.RewardConfig(draw_reward=0.5)
         self.assertAlmostEqual(gym_reward.compute_reward(prev, curr, cfg), 0.5)
 
+    def test_rebirth_detects_stock_loss_when_stock_unreadable(self):
+        cfg = gym_reward.RewardConfig(ko_bonus=1.0, stock_loss=-1.0,
+                                      win_bonus=0.0, loss_penalty=0.0)
+        prev = snap([fighter(stock=0, damage=10.0, is_on_rebirth=0),
+                     fighter(stock=0, damage=50.0, is_on_rebirth=0)])
+        opp_died = snap([fighter(stock=0, damage=0.0, is_on_rebirth=0),
+                         fighter(stock=0, damage=0.0, is_on_rebirth=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, opp_died, cfg), 1.0)
+        ego_died = snap([fighter(stock=0, damage=0.0, is_on_rebirth=1),
+                         fighter(stock=0, damage=0.0, is_on_rebirth=0)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, ego_died, cfg), -1.0)
+
     def test_ego_slot_swap(self):
         prev = snap([fighter(damage=0.0), fighter(damage=0.0)])
         curr = snap([fighter(damage=10.0), fighter(damage=40.0)])

@@ -106,6 +106,14 @@ def _stock(fighter: dict) -> int:
         return 0
 
 
+def _rebirth(fighter: dict) -> bool:
+    """True while the fighter is on the revival platform."""
+    try:
+        return int(fighter.get("is_on_rebirth", 0)) == 1
+    except (TypeError, ValueError):
+        return False
+
+
 def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
                    ego_slot: int | None = None) -> float:
     """Combat reward for the transition ``prev -> curr``.
@@ -142,6 +150,14 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     prev_stock_opp, stock_opp = _stock(pf_opp), _stock(cf_opp)
     lost_opp = max(0, prev_stock_opp - stock_opp)
     lost_ego = max(0, prev_stock_ego - stock_ego)
+    # The live build often reports stock==0 for both slots, so the stock delta
+    # cannot see a KO.  A 0->1 rebirth transition is a direct, per-fighter
+    # death/respawn signal; count the stock once (max avoids double counting
+    # when the stock field is readable as well).
+    if not _rebirth(pf_opp) and _rebirth(cf_opp):
+        lost_opp = max(lost_opp, 1)
+    if not _rebirth(pf_ego) and _rebirth(cf_ego):
+        lost_ego = max(lost_ego, 1)
     reward += cfg.ko_bonus * lost_opp
     reward += cfg.stock_loss * lost_ego
 

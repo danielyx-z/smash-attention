@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import os
 import sys
 import time
@@ -81,6 +82,91 @@ class PPOConfig:
             raise ValueError("value_coef must be >= 0")
         if float(self.kl_coef) < 0.0:
             raise ValueError("kl_coef must be >= 0")
+
+
+class TrainingStats:
+    """Small JSON status file the live viewer reads (bottom-left overlay)."""
+
+    def __init__(self, path: str, cpu_level: int, iterations: int):
+        self.path = os.path.expanduser(path)
+        self.data = {
+            "active": True,
+            "cpu_level": int(cpu_level),
+            "iteration": 0,
+            "iterations": int(iterations),
+            "episodes": 0,
+            "damage_episodes": 0,
+            "wins": 0,
+            "losses": 0,
+            "positive": 0,
+            "sum_dealt": 0.0,
+            "sum_taken": 0.0,
+            "sum_diff": 0.0,
+            "last_dealt": 0.0,
+            "last_taken": 0.0,
+            "last_diff": 0.0,
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "entropy": 0.0,
+            "kl_bc": 0.0,
+            "updated": time.time(),
+        }
+        self.flush()
+
+    def _derived(self) -> None:
+        n = max(1, int(self.data["damage_episodes"]))
+        eps = max(1, int(self.data["episodes"]))
+        self.data["mean_dealt"] = self.data["sum_dealt"] / n
+        self.data["mean_taken"] = self.data["sum_taken"] / n
+        self.data["mean_diff"] = self.data["sum_diff"] / n
+        self.data["positive_rate"] = self.data["positive"] / eps
+        self.data["win_rate"] = self.data["wins"] / eps
+        self.data["updated"] = time.time()
+
+    def flush(self) -> None:
+        self._derived()
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)) or ".",
+                        exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh, indent=2)
+            os.replace(tmp, self.path)
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def record_episode(self, row: dict) -> None:
+        self.data["episodes"] += 1
+        p1, p2 = row.get("p1_damage"), row.get("p2_damage")
+        if p1 is not None and p2 is not None:
+            dealt, taken = float(p2), float(p1)
+            diff = dealt - taken
+            self.data["damage_episodes"] += 1
+            self.data["sum_dealt"] += dealt
+            self.data["sum_taken"] += taken
+            self.data["sum_diff"] += diff
+            self.data["last_dealt"] = dealt
+            self.data["last_taken"] = taken
+            self.data["last_diff"] = diff
+            if diff > 0.0:
+                self.data["positive"] += 1
+        winner = row.get("winner")
+        if winner == 0:
+            self.data["wins"] += 1
+        elif winner == 1:
+            self.data["losses"] += 1
+        self.flush()
+
+    def record_iteration(self, iteration: int, stats: dict) -> None:
+        self.data["iteration"] = int(iteration)
+        for key in ("policy_loss", "value_loss", "entropy", "kl_bc"):
+            if key in stats:
+                self.data[key] = float(stats[key])
+        self.flush()
+
+    def finish(self) -> None:
+        self.data["active"] = False
+        self.flush()
 
 
 def load_bc_model(path: str, device: str,
@@ -222,19 +308,21 @@ def _episode_row(info: dict, length: int, ret: float,
     """
     r = ge._result_from_info(info)
     p1, p2 = r.get("p1_damage"), r.get("p2_damage")
+    winner = r.get("winner")
     if peak:
         if p1 in (None, 0.0) and peak.get("p1_damage", 0.0) > 0.0:
             p1 = peak["p1_damage"]
         if p2 in (None, 0.0) and peak.get("p2_damage", 0.0) > 0.0:
             p2 = peak["p2_damage"]
     return {"length": int(length), "return": float(ret),
-            "p1_damage": p1, "p2_damage": p2,
+            "p1_damage": p1, "p2_damage": p2, "winner": winner,
             "terminated": bool(terminated), "truncated": bool(truncated)}
 
 
 def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     vocab: bc.ActionVocab, mean, std, device: str,
-                    steps: int, seed: int) -> tuple[dict, list[dict]]:
+                    steps: int, seed: int,
+                    on_episode=None) -> tuple[dict, list[dict]]:
     """Run the live env, returning flat transition arrays and episode rows."""
     model.eval()
     windows, prevs, actions, logps, values, rewards = [], [], [], [], [], []
@@ -275,8 +363,11 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             if value is not None:
                 peak[key] = max(peak[key], float(value))
         if terminated or truncated:
-            episodes.append(_episode_row(info, ep_len, ep_ret,
-                                         terminated, truncated, peak))
+            row = _episode_row(info, ep_len, ep_ret,
+                               terminated, truncated, peak)
+            episodes.append(row)
+            if on_episode is not None:
+                on_episode(row)
             ep += 1
             obs, info = ge.reset_env(env, seed + ep)
             state.reset()
@@ -439,6 +530,7 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "entropy": float(args.entropy),
             "value_coef": float(args.value_coef),
             "kl_coef": float(getattr(args, "kl_coef", 0.0)),
+            "stock_value": float(getattr(args, "stock_value", 0.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
             "saved_ns": time.time_ns(),
         },
@@ -479,8 +571,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kl-coef", type=float, default=0.0,
                     help="BC-anchored KL penalty coefficient (0 = off)")
     ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--stock-value", type=float, default=1.0,
+                    help="reward units for each lost/earned stock "
+                         "(1.0 = 100%% damage; 0 disables stock terms)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save-every", type=int, default=1)
+    ap.add_argument("--stats-file", default="/tmp/ssbu_training_stats.json",
+                    help="JSON status file for the live viewer overlay")
+    ap.add_argument("--cpu-level", type=int, default=0,
+                    help="opponent CPU level shown in the overlay")
     ap.add_argument("--start-menus", action="store_true",
                     help="create the pad and walk boot -> match first")
     ap.add_argument("--game-log", default="~/smash.log")
@@ -501,6 +600,8 @@ def main(argv: list[str] | None = None) -> int:
         weight_decay=args.weight_decay, seed=args.seed,
         device=args.device)
     ppo.check()
+    if float(args.stock_value) < 0.0:
+        ap.error("--stock-value must be >= 0")
 
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     torch.manual_seed(ppo.seed)
@@ -518,7 +619,9 @@ def main(argv: list[str] | None = None) -> int:
     log(f"[ppo] warm start {args.model}: vocab {vocab.size} classes, "
         f"window {cfg.window}, horizon {cfg.horizon}, frame_skip "
         f"{cfg.frame_skip}, damage {cfg.damage_mode}, "
-        f"kl_bc={ppo.kl_coef:g}")
+        f"kl_bc={ppo.kl_coef:g}, stock_value={args.stock_value:g}")
+    stats_writer = TrainingStats(args.stats_file, args.cpu_level,
+                                 ppo.iterations)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(ppo.lr),
                                   weight_decay=float(ppo.weight_decay))
@@ -535,11 +638,15 @@ def main(argv: list[str] | None = None) -> int:
                 log(f"[ppo] pad up ({pad.name})")
             from rl.env.gym_env import SSBUGymEnv
             from rl.env.gym_reward import RewardConfig
-            # Damage differential only: every stock/KO/win term is zero.
+            # Damage differential plus a stock/KO term.  `compute_reward`
+            # detects a death from the is_on_rebirth transition when the
+            # live stock field is unreadable.
+            stock_value = float(args.stock_value)
             reward_cfg = RewardConfig(
                 damage_scale=0.01, damage_dealt=1.0, damage_taken=1.0,
-                ko_bonus=0.0, stock_loss=0.0, win_bonus=0.0,
-                loss_penalty=0.0, draw_reward=0.0, ego_slot=0)
+                ko_bonus=stock_value, stock_loss=-stock_value,
+                win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
+                ego_slot=0)
             env = SSBUGymEnv(
                 normalize_obs=cfg.obs_normalize, damage_mode=cfg.damage_mode,
                 frame_skip=cfg.frame_skip, max_steps=ppo.max_steps,
@@ -556,7 +663,8 @@ def main(argv: list[str] | None = None) -> int:
             t0 = time.monotonic()
             batch, episodes = collect_rollout(
                 env, model, state, cfg, vocab, mean, std, device,
-                int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration)
+                int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
+                on_episode=stats_writer.record_episode)
             next_values = batch_values(
                 model, batch["next_windows"], batch["next_prevs"],
                 mean, std, device)
@@ -572,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
                     ref_model, batch["windows"], batch["prevs"],
                     mean, std, device)
             stats = ppo_update(model, optimizer, batch, ppo, mean, std, device)
+            stats_writer.record_iteration(iteration, stats)
             if episodes:
                 dealt = [e["p2_damage"] for e in episodes
                          if e["p2_damage"] is not None]
@@ -607,6 +716,7 @@ def main(argv: list[str] | None = None) -> int:
         log(f"[ppo] final checkpoint {final_path} (latest {args.out})")
         return 0
     finally:
+        stats_writer.finish()
         if env is not None:
             close = getattr(env, "close", None)
             if callable(close):

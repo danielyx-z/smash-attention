@@ -37,8 +37,11 @@ export SSBU_INPUT_NO_FOCUS=1
 export SSBU_RL_MODE=1
 unset SSBU_SEQ SSBU_PLAY SSBU_PRESS SSBU_SCRIPT
 
+CPU_LEVEL="$(printf '%s' "$MATCH" | sed -n 's/.*cpu=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+
 if [[ $BOOT -eq 1 ]]; then
     "$HERE/live.sh" --no-focus --keyboard 0 --match "$MATCH" || exit 1
 fi
 
-exec "$PY" -m rl.rl.ppo --model "$MODEL" --out "$OUT" --start-menus "${ARGS[@]}"
+exec "$PY" -m rl.rl.ppo --model "$MODEL" --out "$OUT" --start-menus \
+    --cpu-level "${CPU_LEVEL:-0}" "${ARGS[@]}"

@@ -79,6 +79,35 @@ class TokenDecodeTest(unittest.TestCase):
         np.testing.assert_allclose(repeat["stick"], decoded["stick"])
 
 
+class TrainingStatsTest(unittest.TestCase):
+    def test_stats_file_tracks_episodes_and_iteration(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "stats.json")
+            stats = ppo.TrainingStats(path, cpu_level=3, iterations=20)
+            stats.record_episode({"p1_damage": 40.0, "p2_damage": 50.0,
+                                  "winner": None})
+            stats.record_episode({"p1_damage": 30.0, "p2_damage": 10.0,
+                                  "winner": 1})
+            stats.record_iteration(2, {"policy_loss": -0.1,
+                                       "value_loss": 0.01,
+                                       "entropy": 1.2,
+                                       "kl_bc": 0.03})
+            stats.finish()
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.assertEqual(data["cpu_level"], 3)
+            self.assertEqual(data["episodes"], 2)
+            self.assertEqual(data["positive"], 1)
+            self.assertEqual(data["losses"], 1)
+            self.assertAlmostEqual(data["mean_dealt"], 30.0)
+            self.assertAlmostEqual(data["mean_diff"], -5.0)
+            self.assertAlmostEqual(data["positive_rate"], 0.5)
+            self.assertEqual(data["iteration"], 2)
+            self.assertFalse(data["active"])
+
+
 class CheckpointNamingTest(unittest.TestCase):
     def test_per_iteration_path_is_stable(self):
         self.assertEqual(
