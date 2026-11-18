@@ -1070,6 +1070,276 @@ def pack_v6_block(seq=2, fight=1) -> bytes:
     return header + b"".join(slots)
 
 
+class HoldLabelTest(unittest.TestCase):
+    """--label-mode hold: the label covers exactly what the pad holds for."""
+
+    def test_or_over_the_hold_window(self):
+        acts = {
+            "buttons": np.zeros((6, bc.N_BUTTONS), np.float32),
+            "stick": np.zeros((6, 2), np.float32),
+            "cstick": np.zeros((6, 2), np.float32),
+            "trigger": np.zeros(6, np.float32),
+        }
+        acts["buttons"][1, bc.BUTTON_INDEX["A"]] = 1.0
+        acts["buttons"][2, bc.BUTTON_INDEX["B"]] = 1.0
+        acts["buttons"][5, bc.BUTTON_INDEX["Y"]] = 1.0
+        acts["stick"][:] = [[0.0, 0.0], [0.4, 0.0], [0.0, 0.9],
+                            [0.0, 0.0], [-1.0, 0.0], [0.0, 0.0]]
+        acts["trigger"][0] = 0.3
+        acts["trigger"][1] = 0.8
+        out = bc.hold_actions(acts, frame_skip=3)
+        self.assertEqual(out["buttons"].shape, (2, bc.N_BUTTONS))
+        self.assertEqual(out["buttons"][0, bc.BUTTON_INDEX["A"]], 1.0)
+        self.assertEqual(out["buttons"][0, bc.BUTTON_INDEX["B"]], 1.0)
+        self.assertEqual(out["buttons"][1, bc.BUTTON_INDEX["Y"]], 1.0)
+        # largest deflection in the window wins
+        np.testing.assert_allclose(out["stick"][0], [0.0, 0.9])
+        np.testing.assert_allclose(out["stick"][1], [-1.0, 0.0])
+        self.assertAlmostEqual(float(out["trigger"][0]), 0.8)
+        self.assertAlmostEqual(float(out["trigger"][1]), 0.0)
+
+    def test_resample_keeps_observations_aligned_with_hold_labels(self):
+        obs, acts = make_obs_actions(17)
+        ep = episode_from_obs_actions(obs, acts)
+        single = bc.resample_episode(ep, frame_skip=5, label_mode="single")
+        hold = bc.resample_episode(ep, frame_skip=5, label_mode="hold")
+        np.testing.assert_array_equal(single.obs, hold.obs)
+        self.assertEqual(len(hold.acts["buttons"]), len(hold.obs))
+        # every single-frame label is a subset of the hold label
+        for k in range(len(hold.obs)):
+            lo, hi = k * 5, min((k + 1) * 5, len(acts["buttons"]))
+            expect = acts["buttons"][lo:hi].max(axis=0)
+            np.testing.assert_allclose(hold.acts["buttons"][k], expect)
+
+    def test_unknown_label_mode_is_rejected(self):
+        obs, acts = make_obs_actions(10)
+        with self.assertRaises(ValueError):
+            bc.resample_episode(episode_from_obs_actions(obs, acts),
+                                frame_skip=5, label_mode="bogus")
+
+
+class ActionVocabTest(unittest.TestCase):
+    @staticmethod
+    def _episode(seed: int = 0, n: int = 24):
+        rng = np.random.default_rng(seed)
+        buttons = np.zeros((n, bc.N_BUTTONS), np.float32)
+        buttons[::4, bc.BUTTON_INDEX["A"]] = 1.0
+        buttons[1::6, bc.BUTTON_INDEX["B"]] = 1.0
+        buttons[2::7, bc.BUTTON_INDEX["Y"]] = 1.0
+        stick = np.zeros((n, 2), np.float32)
+        stick[::2, 0] = 1.0                      # E
+        stick[1::4, 0] = -1.0                    # W
+        stick[3::8] = [0.0, 1.0]                 # N
+        trigger = np.zeros(n, np.float32)
+        trigger[5::9] = 1.0
+        acts = {"buttons": buttons, "stick": stick,
+                "cstick": np.zeros((n, 2), np.float32),
+                "trigger": trigger}
+        obs = np.zeros((n, bc.OBS_DIM), np.float32)
+        return episode_from_obs_actions(obs, acts)
+
+    def test_build_encode_decode_roundtrip(self):
+        vocab = bc.ActionVocab.build([self._episode()], size=64)
+        self.assertGreater(vocab.size, 1)
+        self.assertEqual(vocab.size, len(vocab.keys) + 1)
+        self.assertEqual(bc.REPEAT_TOKEN, 0)
+        keys = bc.action_keys(self._episode().acts)
+        tokens = vocab.encode(keys)
+        in_range = tokens >= 1
+        self.assertTrue(in_range.all())
+        self.assertTrue((tokens < vocab.size).all())
+        # distinct observed keys -> distinct tokens
+        pairs = dict(zip(keys[in_range].tolist(), tokens[in_range].tolist()))
+        self.assertEqual(len(pairs), len(set(pairs.values())))
+        for token in np.unique(tokens):
+            vec = vocab.decode(int(token))
+            one = {"buttons": vec[:bc.N_BUTTONS][None, :],
+                   "stick": vec[bc.N_BUTTONS:bc.N_BUTTONS + 2][None, :],
+                   "trigger": vec[-1:][None, :]}
+            self.assertEqual(int(bc.action_keys(one)[0]),
+                             int(vocab.keys[int(token) - 1]))
+
+    def test_unseen_key_snaps_to_a_known_action(self):
+        vocab = bc.ActionVocab.build([self._episode()], size=8)
+        weird = np.int64(0)
+        weird |= np.int64(1) << bc.BUTTON_INDEX["ZR"]
+        weird |= np.int64(5) << 12               # W
+        weird |= np.int64(2) << 16               # full
+        token = int(vocab.encode([weird])[0])
+        self.assertGreaterEqual(token, 1)
+        self.assertLess(token, vocab.size)
+
+    def test_mirror_is_an_involution_and_matches_the_action_mirror(self):
+        keys = bc.action_keys(self._episode().acts)
+        for key in np.unique(keys):
+            key = int(key)
+            self.assertEqual(int(bc.mirror_key(bc.mirror_key(key))), key)
+        # DPAD L/R swap and the stick x sign flip agree with mirror_action_arrays
+        acts = {"buttons": np.array([[0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0]],
+                                    np.float32),
+                "stick": np.array([[0.6, 0.8]], np.float32),
+                "trigger": np.zeros(1, np.float32)}
+        expected = int(bc.action_keys(bc.mirror_action_arrays(acts))[0])
+        self.assertEqual(int(bc.mirror_key(bc.action_keys(acts)[0])), expected)
+
+    def test_vocab_includes_mirrored_actions(self):
+        vocab = bc.ActionVocab.build([self._episode()], size=64)
+        keys = set(int(k) for k in vocab.keys)
+        for key in list(keys):
+            self.assertIn(int(bc.mirror_key(key)), keys)
+
+    def test_repeat_token_replays_the_previous_action(self):
+        vocab = bc.ActionVocab.build([self._episode()], size=16)
+        prev = np.zeros(17, np.float32)
+        prev[bc.BUTTON_INDEX["A"]] = 1.0
+        prev[12:14] = [1.0, 0.0]
+        prev[16] = 1.0
+        buttons, d, m = bc.decode_tokens([bc.REPEAT_TOKEN], prev, vocab)
+        self.assertEqual(buttons[0, bc.BUTTON_INDEX["A"]], 1.0)
+        self.assertEqual(int(d[0]), 1)           # E
+        self.assertEqual(int(m[0]), 2)           # full
+
+    def test_unchanged_decision_is_labelled_repeat(self):
+        n = 10
+        buttons = np.zeros((n, bc.N_BUTTONS), np.float32)
+        buttons[[0, 1, 2, 6], bc.BUTTON_INDEX["A"]] = 1.0
+        buttons[5, bc.BUTTON_INDEX["B"]] = 1.0
+        stick = np.zeros((n, 2), np.float32)
+        stick[[0, 1, 2, 6], 0] = 1.0
+        acts = {"buttons": buttons, "stick": stick,
+                "cstick": np.zeros((n, 2), np.float32),
+                "trigger": np.zeros(n, np.float32)}
+        ep = episode_from_obs_actions(np.zeros((n, bc.OBS_DIM), np.float32),
+                                      acts)
+        vocab = bc.ActionVocab.build([ep], size=8)
+        samples = bc.window_samples(ep.obs, ep.acts, window=1, horizon=4,
+                                    stick_mode="dir", vocab=vocab)
+        targets = samples["targets"]["action"]
+        base = vocab.encode(bc.action_keys(ep.acts))
+        same = np.zeros(n, bool)
+        same[1:] = base[1:] == base[:-1]
+        expect = np.where(same, bc.REPEAT_TOKEN, base)
+        t = np.arange(n - 3)
+        np.testing.assert_array_equal(targets, np.stack(
+            [expect[i:i + 4] for i in t]))
+        # frames 1, 2 (A+E), 4, 8, 9 (neutral) repeat the previous decision
+        self.assertEqual(int(same.sum()), 5)
+        # a repeat target decodes to the action at the previous decision
+        row = int(np.argmax(targets[:, 0] == bc.REPEAT_TOKEN))
+        btn, d, m = bc.decode_tokens([bc.REPEAT_TOKEN], samples["prev"][row],
+                                     vocab)
+        expect_btn, expect_d, expect_m = bc.decode_tokens(
+            [base[row + 0 - 1]], samples["prev"][row], vocab)
+        np.testing.assert_array_equal(btn, expect_btn)
+        self.assertEqual(int(d[0]), int(expect_d[0]))
+        self.assertEqual(int(m[0]), int(expect_m[0]))
+
+    def test_checkpoint_roundtrip_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "data")
+            os.makedirs(data)
+            for i in range(3):
+                write_episode(os.path.join(data, f"episode_{i:04d}.npz"),
+                              bc.synthetic_episode(90, seed=i, index=i))
+            out = os.path.join(tmp, "vocab.pt")
+            cfg = bc.BCConfig(hidden=32, frame_skip=5, action_mode="vocab",
+                              vocab_size=32, damage_mode="bucket",
+                              label_mode="hold")
+            ckpt, metrics = bc.train(data, out, cfg=cfg, epochs=1, batch=8,
+                                     seed=0, mirror=False,
+                                     log=lambda *a: None)
+            self.assertEqual(ckpt["config"]["action_mode"], "vocab")
+            self.assertEqual(ckpt["config"]["stick_mode"], "dir")
+            self.assertEqual(ckpt["damage_mode"], "bucket")
+            self.assertEqual(ckpt["label_mode"], "hold")
+            self.assertIsNotNone(ckpt["vocab"])
+            self.assertEqual(ckpt["config"]["vocab_size"], metrics["vocab_size"])
+            self.assertTrue(np.all(np.asarray(ckpt["thresholds"]) == 0.5))
+            policy = bc.load_policy(out)
+            self.assertIsNotNone(policy.vocab)
+            action = policy.act(np.zeros(bc.OBS_DIM, np.float32))
+            self.assertEqual(action["buttons"].shape, (bc.N_BUTTONS,))
+            self.assertEqual(action["stick"].shape, (2,))
+            # the decoded action is always one the vocabulary can express
+            arr = np.concatenate([action["buttons"], action["stick"],
+                                  action["cstick"]])
+            self.assertTrue(np.isfinite(arr).all())
+            ens = bc.TemporalEnsemble(policy, execute=2, blend=0.5)
+            self.assertEqual(ens.blend, 0.0)   # vocab never blends actions
+
+
+class DamageBucketTest(unittest.TestCase):
+    def _parity(self, damage_mode: str):
+        try:
+            from rl.env import gym_obs
+        except Exception as exc:                       # pragma: no cover
+            self.skipTest(f"gym_obs not importable: {exc}")
+        ep = bc.synthetic_episode(9, seed=3)
+        raw = ep.raw.copy()
+        values = [0.0, 9.99, 10.0, 83.0, 87.0, 199.9, 250.0]
+        raw[:len(values), 0, bc.FIELD_INDEX["damage"]] = values
+        raw[:len(values), 1, bc.FIELD_INDEX["damage"]] = values[::-1]
+        dicts = [
+            [{name: float(raw[i, k, j]) for j, name in enumerate(bc.FIELDS)}
+             for k in range(2)]
+            for i in range(len(raw))
+        ]
+        expected = np.stack([
+            gym_obs.PolicyObservation(normalize=False,
+                                      damage_mode=damage_mode).build(d)
+            for d in dicts])
+        got = bc.obs_from_raw(raw, damage_mode=damage_mode)
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-6,
+                                   err_msg=damage_mode)
+
+    def test_bucket_matches_gym_obs(self):
+        self._parity("bucket")
+
+    def test_none_matches_gym_obs(self):
+        self._parity("none")
+
+    def test_bucket_values(self):
+        raw = np.zeros((1, 2, len(bc.FIELDS)), np.float32)
+        raw[0, :, bc.FIELD_INDEX["damage"]] = [83.0, 87.0]
+        obs = bc.obs_from_raw(raw, damage_mode="bucket")[0]
+        damage_index = [n for n, _ in bc.SCALAR_FIELDS].index("damage")
+        self.assertEqual(obs[damage_index], 8.0)
+        self.assertEqual(obs[bc.OBS_PER_FIGHTER + damage_index], 8.0)
+        raw[0, 0, bc.FIELD_INDEX["damage"]] = 1000.0
+        obs = bc.obs_from_raw(raw, damage_mode="bucket")[0]
+        self.assertEqual(obs[damage_index], bc.DAMAGE_BUCKETS - 1.0)
+
+    def test_raw_mode_default_is_unchanged(self):
+        ep = bc.synthetic_episode(6, seed=1)
+        np.testing.assert_allclose(bc.obs_from_raw(ep.raw),
+                                   bc.obs_from_raw(ep.raw, damage_mode="raw"))
+
+
+class DedupeTest(unittest.TestCase):
+    def test_identical_recordings_are_dropped_before_the_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = bc.synthetic_episode(30, seed=2, index=0)
+            other = bc.synthetic_episode(30, seed=3, index=1)
+            # synthetic raw_fighters do not depend on the seed; make it different
+            other.raw[0, 1, bc.FIELD_INDEX["damage"]] += 1.0
+            write_episode(os.path.join(tmp, "episode_0000.npz"), base)
+            # same raw_fighters, different metadata/timestamps on purpose
+            dup = bc.EpisodeData(1, "dup", dict(base.meta, index=1), base.raw,
+                                 base.buttons_raw, base.stick, base.cstick,
+                                 base.trigger, obs=base.obs, acts=base.acts)
+            write_episode(os.path.join(tmp, "episode_0001.npz"), dup)
+            write_episode(os.path.join(tmp, "episode_0002.npz"), other)
+            logs = []
+            deduped = bc.load_episodes(tmp, log=logs.append)
+            self.assertEqual(len(deduped), 2)
+            self.assertTrue(any("dedupe" in line for line in logs))
+            raw = bc.load_episodes(tmp, dedupe=False, log=lambda *a: None)
+            self.assertEqual(len(raw), 3)
+            # the limit applies after dedupe
+            one = bc.load_episodes(tmp, limit=1, log=lambda *a: None)
+            self.assertEqual(len(one), 1)
+
+
 class RecorderTest(unittest.TestCase):
     def test_v7_reader_and_layout(self):
         with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as fh:

@@ -1646,6 +1646,55 @@ Caveats: 3 episodes each, and episode-to-episode variance is large (one plain
 episode took 149 %), so this is a direction, not a measurement. The two models
 also saw different data volumes.
 
+### Joint-action vocab, hold labels, damage buckets (30 Hz, 100 eps)
+
+Four dataset/head changes, trained on the same 100 episodes and with the same
+80/10/10 split and return weights as the conservative run above:
+
+* **Hold labels** (`--label-mode hold`): a decision is labelled with the union
+  of the buttons over the `frame_skip` frames the pad actually holds it for
+  (stick/C-stick take the largest deflection). Labelling one frame lost 23 % of
+  A and 56 % of B taps at 30 Hz. Raises the expert rates to A 4.36 %, B 0.75 %,
+  Y 4.86 %, X 8.49 % (from 3.51/0.48/4.27/6.06).
+* **Damage buckets** (`--damage-mode bucket`): damage in the observation is a
+  10 % bucket index (20 values) instead of the raw percent. 83 % and 87 % are
+  the same input; the signal stays causal but stops being a near-unique sample
+  id. The live env takes the same mode from the checkpoint
+  (`PolicyObservation(damage_mode=...)`).
+* **Content dedupe** (on by default): episodes whose `raw_fighters` hash equal
+  are dropped before the limit, so identical recordings cannot straddle the
+  train/val split.
+* **One token head** (`--action-mode vocab`): one softmax over the 63 observed
+  joint action tuples plus a repeat token, instead of 12 independent button
+  sigmoids and separate stick heads. A decision whose tuple equals the previous
+  one is labelled repeat; 78 % of expert decisions at 30 Hz are repeats, so
+  "hold" becomes one class instead of hundreds of near-equal tuples. At
+  inference the repeat token re-emits the previously executed action, and
+  temporal-ensemble blending is disabled for token checkpoints (averaging two
+  actions can invent a tuple the head never chose). With a softmax the argmax
+  is unchanged by the collapse; the gain is parameter sharing.
+
+Offline (test): token accuracy 0.794, f1_active 0.719, f1_change 0.629, stick
+direction 0.870, repeat rate predicted 0.767 vs expert 0.779. The token loss
+converges in 2 epochs and then overfits; early stopping on val loss selected
+epoch 2/9 (the old BCE model selected 19/26). It is a weaker offline model than
+CWBC, which is the usual warning that offline F1 does not predict the loop.
+
+Closed loop, fresh boot for each, `--sample --execute 1 --no-blend`, 3 x 900
+decisions, DK vs DK CPU 9:
+
+| model | damage dealt | damage taken | differential | A | X | stick neutral |
+|---|---|---|---|---|---|---|
+| CWBC (this session) | 7.6, 18.8, 0.0 (8.8) | 86.9, 50.4, 48.8 (62.0) | -53.2 | 2.0 | 20.1 | 0.502 |
+| vocab + hold + buckets | 46.6, 32.3, 27.7 (35.5) | 99.2, 104.0, 70.5 (91.2) | -55.7 | 3.7 | 8.4 | 0.453 |
+
+The token model deals **4x** the damage of CWBC and shields at the expert rate
+(8.4 % vs 20.1 %), but takes 47 % more; the net differential is a wash. The
+historical CWBC -29.1 did not reproduce in this session (the same checkpoint
+scored -53.2 on a fresh boot), so the CPU/session variance is larger than the
+difference between the two policies. For an RL initialisation the token model
+is the more active starting point, but 3 episodes cannot rank them.
+
 ### Damage resets on a KO: what the reward does and does not count
 
 Measured over 30 episodes of `data/il/dk9` (255-stock rule):

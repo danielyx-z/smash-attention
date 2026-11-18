@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import copy
 import json
 import os
@@ -104,6 +105,10 @@ FIELD_INDEX = {name: i for i, name in enumerate(FIELDS)}
 STICK_BINS = 9
 N_ACTIONS = STICK_BINS * STICK_BINS
 FRAME_SKIP = 5
+#: Damage is recorded as a percentage; "bucket" mode feeds the 10 % bucket
+#: index instead of the raw value so that 83 % and 87 % are the same input.
+DAMAGE_BUCKET = 10.0
+DAMAGE_BUCKETS = 20
 
 # Per-fighter observation layout (CONTRACTS.md profile v1).  Agent C's
 # gym_obs.py is the single source of truth for the value scaling and the
@@ -142,6 +147,8 @@ try:  # Agent C's module is the source of truth when it is importable.
         int(s) for _n, s in _gym_obs.CURATED_ACTION_STATES)
     FAMILY_FLAGS = tuple((str(n), tuple(int(x) for x in ids))
                          for n, ids in _gym_obs.FAMILY_FLAGS)
+    DAMAGE_BUCKET = float(getattr(_gym_obs, "DAMAGE_BUCKET", DAMAGE_BUCKET))
+    DAMAGE_BUCKETS = int(getattr(_gym_obs, "DAMAGE_BUCKETS", DAMAGE_BUCKETS))
     OBS_PROFILE = "gym_obs"
 except Exception:  # standalone fallback (identical values)
     SCALAR_FIELDS = _LOCAL_SCALARS
@@ -295,7 +302,15 @@ def soft_argmax_xy(logits: torch.Tensor, bins: int = STICK_BINS,
 # ---------------------------------------------------------------------------
 # observation helpers
 # ---------------------------------------------------------------------------
-def obs_from_raw(raw, normalize: bool = False) -> np.ndarray:
+def damage_bucket(value):
+    """10 % damage bucket index, clipped to ``DAMAGE_BUCKETS - 1``."""
+    v = np.asarray(value, np.float32)
+    b = np.floor(np.nan_to_num(v, nan=0.0) / DAMAGE_BUCKET)
+    return np.clip(b, 0.0, DAMAGE_BUCKETS - 1.0).astype(np.float32)
+
+
+def obs_from_raw(raw, normalize: bool = False,
+                 damage_mode: str = "raw") -> np.ndarray:
     """Build the 100-dim policy observation from (..., 2, 32) raw slots.
 
     Mirrors ``gym_obs.PolicyObservation(normalize=normalize)`` exactly:
@@ -325,7 +340,12 @@ def obs_from_raw(raw, normalize: bool = False) -> np.ndarray:
         pos = 0
         for name, scale in SCALAR_FIELDS:
             value = vals[..., FIELD_INDEX[name]]
-            b[..., pos] = value / scale if normalize else value
+            if name == "damage" and damage_mode != "raw":
+                if damage_mode == "bucket":
+                    b[..., pos] = damage_bucket(value)
+                # "none": the slot stays zero
+            else:
+                b[..., pos] = value / scale if normalize else value
             pos += 1
 
         states = vals[..., FIELD_INDEX["action_state"]].astype(np.int64)
@@ -378,6 +398,190 @@ def mirror_action_arrays(acts: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# joint action vocabulary
+# ---------------------------------------------------------------------------
+#: The learned token that means "emit the previous action again".  It is a
+#: token like any other, so the policy can *choose* to hold instead of jitter.
+REPEAT_TOKEN = 0
+#: Compass mirror across the vertical axis: E<->W, NE<->NW, SW<->SE.
+_MIRROR_DIR = np.array([0, 5, 4, 3, 2, 1, 8, 7, 6], np.int64)
+
+
+def action_keys(acts: dict, trigger_threshold: float = 0.5) -> np.ndarray:
+    """One integer per decision: buttons | dir<<12 | mag<<16 | trigger<<19.
+
+    The 12 button bits are dense (canonical order), so a key is a complete,
+    discrete action.  ``--stick-mode dir`` already makes the expert's stick
+    discrete (96 % of frames are neutral or full deflection), so this loses
+    almost nothing and turns the action space into a small vocabulary.
+    """
+    btn = np.asarray(acts["buttons"], np.float32)
+    if btn.ndim != 2 or btn.shape[1] != N_BUTTONS:
+        raise ValueError(f"buttons must be (N, {N_BUTTONS}), got {btn.shape}")
+    on = btn >= 0.5
+    mask = np.zeros(len(btn), np.int64)
+    for i in range(N_BUTTONS):
+        mask |= on[:, i].astype(np.int64) << i
+    d, m = stick_to_dir(acts["stick"])
+    trig = np.asarray(acts["trigger"], np.float32).reshape(-1) >= trigger_threshold
+    return (mask | (d.astype(np.int64) << 12) | (m.astype(np.int64) << 16)
+            | (trig.astype(np.int64) << 19))
+
+
+def key_parts(key):
+    """``(buttons, dir, mag, trigger)`` for one key or an array of keys."""
+    k = np.asarray(key, np.int64)
+    return k & 0xFFF, (k >> 12) & 0xF, (k >> 16) & 0x3, (k >> 19) & 0x1
+
+
+def mirror_key(key):
+    """Key of the horizontally mirrored action (DPAD L/R swap, stick x flip)."""
+    k = np.asarray(key, np.int64)
+    mask, d, m, t = key_parts(k)
+    left = np.int64(1) << BUTTON_INDEX["DPAD_L"]
+    right = np.int64(1) << BUTTON_INDEX["DPAD_R"]
+    new = (mask & ~(left | right)) | ((mask & left) << 1) | ((mask & right) >> 1)
+    md = _MIRROR_DIR[np.clip(d, 0, 8)]
+    return new | (md << 12) | (m << 16) | (t << 19)
+
+
+def _key_distance(a, b) -> np.ndarray:
+    """Rough action distance: buttons dominate, then direction, then magnitude."""
+    am, ad, amg, at = key_parts(a)
+    bm, bd, bmg, bt = key_parts(b)
+    xor = am ^ bm
+    hamming = np.zeros_like(xor)
+    for i in range(N_BUTTONS):
+        hamming = hamming + ((xor >> i) & 1)
+    dd = np.abs(ad - bd)
+    dd = np.minimum(dd, 8 - dd)
+    return 4.0 * hamming + 2.0 * dd + 3.0 * np.abs(amg - bmg) + np.abs(at - bt)
+
+
+@dataclass
+class ActionVocab:
+    """The observed action tuples plus the repeat token (index 0).
+
+    Built from the *training* episodes only, over both the recorded and the
+    horizontally mirrored actions, so the mirror augmentation can never produce
+    a token the vocabulary cannot express.
+    """
+
+    keys: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))
+
+    def __post_init__(self):
+        self.keys = np.asarray(self.keys, np.int64).reshape(-1)
+        order = np.argsort(self.keys)
+        self._sorted = self.keys[order]
+        self._tokens = (order + 1).astype(np.int64)
+
+    @property
+    def size(self) -> int:
+        return len(self.keys) + 1
+
+    @classmethod
+    def build(cls, episodes, size: int = 64) -> "ActionVocab":
+        counts: dict[int, int] = {}
+        for ep in episodes:
+            for acts in (ep.acts, mirror_action_arrays(ep.acts)):
+                for key, n in zip(*np.unique(action_keys(acts),
+                                             return_counts=True)):
+                    counts[int(key)] = counts.get(int(key), 0) + int(n)
+        room = max(1, int(size) - 1)
+        ordered = sorted(counts, key=lambda k: -counts[k])
+        kept = ordered[:room]
+        kept_set = set(kept)
+        for key in ordered[:room]:
+            mirror = int(mirror_key(key))
+            if mirror not in kept_set and len(kept) < room:
+                kept.append(mirror)
+                kept_set.add(mirror)
+        keys = np.asarray(kept, np.int64)
+        return cls(keys=keys)
+
+    def encode(self, keys) -> np.ndarray:
+        """Keys -> token indices; unseen keys snap to the nearest known one."""
+        k = np.asarray(keys, np.int64)
+        tok = np.zeros(k.shape, np.int64)
+        if not len(self.keys):
+            return tok
+        pos = np.clip(np.searchsorted(self._sorted, k), 0, len(self._sorted) - 1)
+        hit = self._sorted[pos] == k
+        tok[hit] = self._tokens[pos[hit]]
+        if not hit.all():
+            missing = np.unique(k[~hit])
+            remap = {int(v): self._nearest(int(v)) for v in missing}
+            tok[~hit] = np.asarray([remap[int(v)] for v in k[~hit]], np.int64)
+        return tok
+
+    def _nearest(self, key: int) -> int:
+        return int(np.argmin(_key_distance(self.keys, np.int64(key)))) + 1
+
+    def decode(self, token: int) -> np.ndarray:
+        """Token -> 17-vector ``[buttons(12), stick(2), cstick(2), trigger(1)]``.
+
+        ``REPEAT_TOKEN`` decodes to zeros; callers resolve it against the
+        previous action.
+        """
+        out = np.zeros(12 + 2 + 2 + 1, np.float32)
+        if int(token) == REPEAT_TOKEN or not len(self.keys):
+            return out
+        key = self.keys[min(int(token) - 1, len(self.keys) - 1)]
+        mask, d, m, t = key_parts(key)
+        for i in range(N_BUTTONS):
+            out[i] = float((int(mask) >> i) & 1)
+        out[12:14] = dir_to_xy(np.asarray([d]), np.asarray([m]))[0]
+        out[16] = float(t)
+        return out
+
+    def to_dict(self) -> dict:
+        return {"keys": [int(k) for k in self.keys]}
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "ActionVocab":
+        return cls(keys=np.asarray(payload.get("keys", []), np.int64))
+
+
+def decode_tokens(tokens, prev, vocab: ActionVocab) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Tokens -> ``(buttons (N,12), dir (N,), mag (N,))``; repeat uses ``prev``."""
+    tokens = np.asarray(tokens, np.int64).reshape(-1)
+    prev = np.asarray(prev, np.float32)
+    n = len(tokens)
+    if prev.ndim == 1:
+        prev = prev[None, :]
+    if len(prev) == 1 and n > 1:
+        prev = np.repeat(prev, n, axis=0)
+    btn = np.zeros((n, N_BUTTONS), np.float32)
+    d = np.zeros(n, np.int64)
+    mag = np.zeros(n, np.int64)
+    rep = tokens == REPEAT_TOKEN
+    if rep.any():
+        btn[rep] = (prev[rep, :N_BUTTONS] >= 0.5).astype(np.float32)
+        d[rep], mag[rep] = stick_to_dir(prev[rep, N_BUTTONS:N_BUTTONS + 2])
+    used = ~rep
+    if used.any():
+        key = np.asarray(vocab.keys)[np.clip(tokens[used] - 1, 0,
+                                             max(0, len(vocab.keys) - 1))]
+        mask, dd, mm, _t = key_parts(key)
+        for i in range(N_BUTTONS):
+            btn[used, i] = ((mask >> i) & 1).astype(np.float32)
+        d[used] = dd
+        mag[used] = mm
+    return btn, d, mag
+
+
+def action_vector(action: dict, cfg) -> np.ndarray:
+    """The ``prev`` vector for an action dict (layout of ``prev_action_vectors``)."""
+    parts = [np.asarray(action["buttons"], np.float32),
+             np.asarray(action["stick"], np.float32)]
+    if getattr(cfg, "cstick", False):
+        parts.append(np.asarray(action.get("cstick", np.zeros(2)), np.float32))
+    if getattr(cfg, "trigger", True):
+        parts.append(np.asarray([action.get("trigger", 0.0)], np.float32))
+    return np.concatenate(parts).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
 # episode loading / dataset construction
 # ---------------------------------------------------------------------------
 @dataclass
@@ -392,12 +596,13 @@ class EpisodeData:
     trigger: np.ndarray       # (N, 2)
     player: int = 0
     shield_from_status: bool = True
+    damage_mode: str = "raw"
     obs: np.ndarray = field(default=None, repr=False)
     acts: dict = field(default=None, repr=False)
 
     def __post_init__(self):
         if self.obs is None:
-            self.obs = obs_from_raw(self.raw)
+            self.obs = obs_from_raw(self.raw, damage_mode=self.damage_mode)
         if self.acts is None:
             self.acts = self._actions()
 
@@ -430,6 +635,7 @@ class EpisodeData:
                            self.buttons_raw, self.stick, self.cstick,
                            self.trigger, player=player,
                            shield_from_status=self.shield_from_status,
+                           damage_mode=self.damage_mode,
                            obs=self.obs, acts=None)
 
 
@@ -463,7 +669,8 @@ def _read_meta(data, path: str) -> dict:
 
 
 def load_episode(path: str, player: int = 0, normalize_obs: bool = False,
-                 shield_from_status: bool = True) -> EpisodeData:
+                 shield_from_status: bool = True,
+                 damage_mode: str = "raw") -> EpisodeData:
     with np.load(path, allow_pickle=False) as data:
         for key in ("raw_fighters", "buttons_raw", "stick", "cstick",
                     "trigger", "seq"):
@@ -489,11 +696,14 @@ def load_episode(path: str, player: int = 0, normalize_obs: bool = False,
     return EpisodeData(meta["index"], path, meta, raw, buttons_raw, stick,
                        cstick, trigger, player=player,
                        shield_from_status=shield_from_status,
-                       obs=obs_from_raw(raw, normalize=normalize_obs))
+                       damage_mode=damage_mode,
+                       obs=obs_from_raw(raw, normalize=normalize_obs,
+                                        damage_mode=damage_mode))
 
 
 def load_episodes(data_dir: str, player: int = 0, limit: int | None = None,
                   normalize_obs: bool = False, shield_from_status: bool = True,
+                  damage_mode: str = "raw", dedupe: bool = True,
                   log=print) -> list[EpisodeData]:
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"data dir not found: {data_dir}")
@@ -503,6 +713,25 @@ def load_episodes(data_dir: str, player: int = 0, limit: int | None = None,
             paths.append(os.path.join(data_dir, name))
     if not paths:
         raise FileNotFoundError(f"no episode_*.npz recordings in {data_dir}")
+    if dedupe:
+        # Identical recordings happen (the same match captured twice); left in,
+        # a duplicate pair can straddle the train/val split and make validation
+        # optimistic.  Compare the published fighter frames, not the file bytes
+        # (timestamps differ).
+        keep, seen = [], set()
+        for path in paths:
+            with np.load(path, allow_pickle=False) as data:
+                digest = hashlib.sha1(
+                    np.ascontiguousarray(data["raw_fighters"]).tobytes()
+                ).hexdigest()
+            if digest in seen:
+                continue
+            seen.add(digest)
+            keep.append(path)
+        if len(keep) != len(paths):
+            log(f"[bc] dedupe: dropped {len(paths) - len(keep)} of "
+                f"{len(paths)} episodes with identical content")
+        paths = keep
     if limit is not None:
         paths = paths[:limit]
     episodes = []
@@ -510,7 +739,8 @@ def load_episodes(data_dir: str, player: int = 0, limit: int | None = None,
         try:
             ep = load_episode(path, player=player,
                               normalize_obs=normalize_obs,
-                              shield_from_status=shield_from_status)
+                              shield_from_status=shield_from_status,
+                              damage_mode=damage_mode)
         except Exception as exc:
             log(f"[bc] skipping {path}: {exc}")
             continue
@@ -531,14 +761,56 @@ def resample_indices(n: int, frame_skip: int = FRAME_SKIP) -> np.ndarray:
     return np.arange(0, n, frame_skip, dtype=np.int64)
 
 
-def resample_episode(ep: EpisodeData, frame_skip: int = FRAME_SKIP) -> EpisodeData:
+def hold_actions(acts: dict, frame_skip: int = FRAME_SKIP) -> dict:
+    """Label each decision with what the expert did over the whole hold.
+
+    The env writes one action and advances ``frame_skip`` frames, so the policy
+    physically cannot change input inside that window.  Labelling the decision
+    with a single frame instead loses every tap that lands on the other frame
+    (23 % of A presses, 56 % of B) and makes the target look noisy.  Buttons are
+    OR-ed; the stick and C-stick take the largest deflection in the window.
+    """
+    n = len(acts["buttons"])
+    skip = max(1, int(frame_skip))
+    m = (n + skip - 1) // skip
+    need = m * skip
+
+    def pad(x):
+        x = np.asarray(x)
+        if need == n:
+            return x
+        return np.concatenate([x, np.repeat(x[-1:], need - n, axis=0)], axis=0)
+
+    btn = pad(acts["buttons"]).reshape(m, skip, -1)
+    st = pad(acts["stick"]).reshape(m, skip, 2)
+    cs = pad(acts["cstick"]).reshape(m, skip, 2)
+    tr = pad(np.asarray(acts["trigger"]).reshape(-1, 1)).reshape(m, skip)
+    rows = np.arange(m)
+    out = {
+        "buttons": btn.max(axis=1).astype(np.float32),
+        "stick": st[rows, np.argmax(np.hypot(st[..., 0], st[..., 1]), axis=1)],
+        "cstick": cs[rows, np.argmax(np.hypot(cs[..., 0], cs[..., 1]), axis=1)],
+        "trigger": tr.max(axis=1).astype(np.float32),
+    }
+    return out
+
+
+def resample_episode(ep: EpisodeData, frame_skip: int = FRAME_SKIP,
+                     label_mode: str = "single") -> EpisodeData:
     idx = resample_indices(len(ep.raw), frame_skip)
+    if label_mode == "hold":
+        acts = hold_actions(ep.acts, frame_skip)
+    elif label_mode == "single":
+        acts = {k: v[idx] for k, v in ep.acts.items()}
+    else:
+        raise ValueError(f"label_mode must be single or hold, got {label_mode!r}")
     return EpisodeData(
         ep.index, ep.path, ep.meta, ep.raw[idx], ep.buttons_raw[idx],
         ep.stick[idx], ep.cstick[idx], ep.trigger[idx], player=ep.player,
         shield_from_status=ep.shield_from_status,
+        damage_mode=ep.damage_mode,
         obs=ep.obs[idx],
-        acts={k: v[idx] for k, v in ep.acts.items()},
+        acts=acts,
     )
 
 
@@ -608,7 +880,8 @@ def _empty_targets(horizon: int, stick_mode: str) -> dict:
     t = {"buttons": np.zeros((0, horizon, N_BUTTONS), np.float32),
          "stick": np.zeros((0, horizon), np.int64),
          "cstick": np.zeros((0, horizon), np.int64),
-         "trigger": np.zeros((0, horizon), np.float32)}
+         "trigger": np.zeros((0, horizon), np.float32),
+         "action": np.zeros((0, horizon), np.int64)}
     if stick_mode == "dir":
         t["stick_mag"] = np.zeros((0, horizon), np.int64)
     return t
@@ -618,7 +891,8 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
                    horizon: int = 4, include_cstick: bool = False,
                    include_trigger: bool = True, stick_mode: str = "grid",
                    frame_weights: np.ndarray | None = None,
-                   window_dtype: Any = np.float32) -> dict:
+                   window_dtype: Any = np.float32,
+                   vocab: ActionVocab | None = None) -> dict:
     """Build aligned samples for one episode (never crosses an episode).
 
     Window at decision ``t`` = observations ``t-window+1 .. t``; previous
@@ -651,6 +925,17 @@ def window_samples(obs: np.ndarray, acts: dict, window: int = 8,
         targets["stick_mag"] = np.stack([m[i:i + horizon] for i in t])
     else:
         targets["stick"] = np.stack([stick_to_bin(acts["stick"][i:i + horizon]) for i in t])
+    if vocab is not None:
+        tokens = vocab.encode(action_keys(acts))
+        # Label an unchanged decision as the repeat token.  78 % of expert
+        # decisions at 30 Hz are the same tuple as the one before, so this
+        # turns "hold" into a single class instead of hundreds of near-equal
+        # tuples, and it is what lets the head *choose* to hold rather than
+        # re-predict the whole tuple every decision.
+        same = np.zeros(len(tokens), dtype=bool)
+        same[1:] = tokens[1:] == tokens[:-1]
+        tokens = np.where(same, REPEAT_TOKEN, tokens)
+        targets["action"] = np.stack([tokens[i:i + horizon] for i in t]).astype(np.int64)
     out = {
         "windows": windows,
         "prev": prev.astype(np.float32),
@@ -707,6 +992,7 @@ def ego_swap_episode(ep: EpisodeData) -> EpisodeData:
     return EpisodeData(ep.index, ep.path, ep.meta, ep.raw, ep.buttons_raw,
                        ep.stick, ep.cstick, ep.trigger, player=1 - ep.player,
                        shield_from_status=ep.shield_from_status,
+                       damage_mode=ep.damage_mode,
                        obs=ego_swap_obs(ep.obs), acts=None)
 
 
@@ -714,6 +1000,7 @@ def mirror_episode(ep: EpisodeData) -> EpisodeData:
     return EpisodeData(ep.index, ep.path, ep.meta, ep.raw, ep.buttons_raw,
                        ep.stick, ep.cstick, ep.trigger, player=ep.player,
                        shield_from_status=ep.shield_from_status,
+                       damage_mode=ep.damage_mode,
                        obs=mirror_obs(ep.obs),
                        acts=mirror_action_arrays(ep.acts))
 
@@ -724,7 +1011,8 @@ def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
                 weight_quantile: float = 0.5, weight_min: float = 0.1,
                 weight_max: float = 10.0,
                 reward_scale: float = 0.01,
-                window_dtype: Any = np.float32) -> dict:
+                window_dtype: Any = np.float32,
+                vocab: ActionVocab | None = None) -> dict:
     """Windows for these episodes; with ``return_beta > 0`` each sample also
     carries a conservative return weight (see :func:`return_weights`)."""
     parts = []
@@ -743,14 +1031,16 @@ def samples_for(episodes: list[EpisodeData], cfg: "BCConfig",
                                         cfg.cstick, cfg.trigger,
                                         stick_mode=cfg.stick_mode,
                                         frame_weights=fw,
-                                        window_dtype=window_dtype))
+                                        window_dtype=window_dtype,
+                                        vocab=vocab))
             if mirror:
                 mv = mirror_episode(v)
                 parts.append(window_samples(mv.obs, mv.acts, cfg.window,
                                             cfg.horizon, cfg.cstick, cfg.trigger,
                                             stick_mode=cfg.stick_mode,
                                             frame_weights=fw,
-                                            window_dtype=window_dtype))
+                                            window_dtype=window_dtype,
+                                            vocab=vocab))
     return concat_samples(parts)
 
 
@@ -876,6 +1166,15 @@ class BCConfig:
     # CPU recordings put a spurious X (0x4) in the guard mask 0x8004; relabel
     # guard-family frames as ZL=1/X=0 for the training target.
     shield_from_status: bool = True
+    # "heads": per-button sigmoid + separate stick heads (the original).
+    # "vocab": one softmax over the observed joint action tuples + repeat.
+    action_mode: str = "heads"
+    vocab_size: int = 64
+    # "raw": damage in percent, "bucket": 10 % buckets, "none": zeroed out.
+    damage_mode: str = "raw"
+    # "single": label = the action at the decision frame.
+    # "hold": OR over the ``frame_skip`` frames the action is actually held for.
+    label_mode: str = "single"
 
     @property
     def prev_dim(self) -> int:
@@ -898,6 +1197,11 @@ class BCPolicyNet(nn.Module):
             nn.Dropout(cfg.dropout),
         )
         h, H, bins = cfg.hidden, cfg.horizon, cfg.bins
+        if cfg.action_mode == "vocab":
+            # One logit per action token: a mutually-exclusive choice, so the
+            # distribution can be multimodal without averaging the modes.
+            self.action_head = nn.Linear(h, H * int(cfg.vocab_size))
+            return
         self.button_head = nn.Linear(h, H * N_BUTTONS)
         self.stick_out = STICK_DIRS if cfg.stick_mode == "dir" else bins * bins
         self.stick_head = nn.Linear(h, H * self.stick_out)
@@ -911,6 +1215,9 @@ class BCPolicyNet(nn.Module):
         z = self.trunk(torch.cat([h_n[-1], prev], dim=-1))
         cfg = self.cfg
         B, H, bins = z.shape[0], cfg.horizon, cfg.bins
+        if cfg.action_mode == "vocab":
+            return {"action": self.action_head(z).reshape(B, H,
+                                                          int(cfg.vocab_size))}
         out = {
             "buttons": self.button_head(z).reshape(B, H, N_BUTTONS),
             "stick": self.stick_head(z).reshape(B, H, self.stick_out),
@@ -1023,7 +1330,7 @@ class BCPolicy:
     """Checkpoint-backed policy; feed it the 100-dim observation each step."""
 
     def __init__(self, checkpoint: dict, device: str = "cpu",
-                 sample: bool = False):
+                 sample: bool = False, temperature: float = 1.0):
         if isinstance(checkpoint, str):
             checkpoint = load_checkpoint(checkpoint)
         cfg = BCConfig(**{k: v for k, v in checkpoint["config"].items()
@@ -1035,6 +1342,12 @@ class BCPolicy:
         #: drifted off the expert's states predicts "neutral" almost surely, so
         #: the argmax stands still in closed loop; sampling keeps it moving.
         self.sample = bool(sample)
+        #: Softmax temperature for token sampling (<1 = more committed).
+        self.temperature = max(1e-3, float(temperature))
+        payload = checkpoint.get("vocab")
+        self.vocab = ActionVocab.from_dict(payload) if payload else None
+        if cfg.action_mode == "vocab" and self.vocab is None:
+            raise ValueError("checkpoint has action_mode=vocab but no vocabulary")
         self.net = BCPolicyNet(cfg).to(self.device)
         self.net.load_state_dict(checkpoint["state_dict"])
         self.net.eval()
@@ -1073,23 +1386,55 @@ class BCPolicy:
         if action is None:
             self._prev = np.zeros(self.cfg.prev_dim, np.float32)
             return
-        parts = [np.asarray(action["buttons"], np.float32),
-                 np.asarray(action["stick"], np.float32)]
-        if self.cfg.cstick:
-            parts.append(np.asarray(action.get("cstick", np.zeros(2)), np.float32))
-        if self.cfg.trigger:
-            parts.append(np.asarray([action.get("trigger", 0.0)], np.float32))
-        self._prev = np.concatenate(parts).astype(np.float32)
+        self._prev = action_vector(action, self.cfg)
 
     def plan(self) -> list[dict]:
         """Predict the next H actions from the current observation history."""
         obs = self._window()
         return self._plan_from(obs)
 
+    def _token_action(self, token: int, prev: np.ndarray) -> dict:
+        """One token -> an action dict; the repeat token re-emits ``prev``."""
+        if int(token) == REPEAT_TOKEN:
+            buttons = (np.asarray(prev[:N_BUTTONS]) >= 0.5).astype(np.float32)
+            stick = np.asarray(prev[N_BUTTONS:N_BUTTONS + 2], np.float32).copy()
+            off = N_BUTTONS + 2
+            cstick = (np.asarray(prev[off:off + 2], np.float32).copy()
+                      if self.cfg.cstick else np.zeros(2, np.float32))
+            if self.cfg.cstick:
+                off += 2
+            trigger = (float(prev[off]) if self.cfg.trigger and len(prev) > off
+                       else 0.0)
+        else:
+            vec = self.vocab.decode(int(token))
+            buttons = (vec[:N_BUTTONS] >= 0.5).astype(np.float32)
+            stick = vec[N_BUTTONS:N_BUTTONS + 2].copy()
+            cstick = vec[N_BUTTONS + 2:N_BUTTONS + 4].copy()
+            trigger = float(vec[N_BUTTONS + 4])
+        return {"buttons": buttons, "stick": stick, "cstick": cstick,
+                "trigger": trigger}
+
+    def _decode_chunk(self, tokens) -> list[dict]:
+        prev = self._prev.copy()
+        out = []
+        for token in np.asarray(tokens, np.int64).reshape(-1):
+            action = self._token_action(int(token), prev)
+            prev = action_vector(action, self.cfg)
+            out.append(action)
+        return out
+
     def _plan_from(self, obs: torch.Tensor) -> list[dict]:
         prev = torch.from_numpy(self._prev).unsqueeze(0).to(self.device)
         with torch.no_grad():
             out = self.net(obs, prev)
+        if self.cfg.action_mode == "vocab":
+            logits = out["action"][0]
+            if self.sample:
+                probs = torch.softmax(logits / self.temperature, dim=-1)
+                tokens = torch.multinomial(probs, 1).squeeze(-1).cpu().numpy()
+            else:
+                tokens = torch.argmax(logits, dim=-1).cpu().numpy()
+            return self._decode_chunk(tokens)
         bp = torch.sigmoid(out["buttons"])[0].cpu().numpy()      # (H,12)
         if self.sample:
             rng = np.random.default_rng()
@@ -1162,6 +1507,10 @@ class TemporalEnsemble:
                  blend: float = 0.5):
         self.policy = policy
         self.execute = max(1, int(execute))
+        # Averaging whole actions can invent a combination the token head
+        # never chose (A + a direction), so vocab checkpoints never blend.
+        if getattr(policy.cfg, "action_mode", "heads") == "vocab":
+            blend = 0.0
         self.blend = float(blend)
         self.reset()
 
@@ -1366,6 +1715,13 @@ def _weighted_mean(values: torch.Tensor, weights: torch.Tensor | None) -> torch.
 
 def _loss(out: dict, targets: dict, pos_weight: torch.Tensor,
           cfg: BCConfig, weights: torch.Tensor | None = None) -> tuple[torch.Tensor, dict]:
+    if cfg.action_mode == "vocab":
+        logits = out["action"]
+        el = F.cross_entropy(logits.reshape(-1, logits.shape[-1]),
+                             targets["action"].reshape(-1),
+                             reduction="none").reshape(logits.shape[:2])
+        loss = _weighted_mean(el, weights)
+        return loss, {"action": float(loss.detach())}
     btn = F.binary_cross_entropy_with_logits(
         out["buttons"], targets["buttons"], pos_weight=pos_weight,
         reduction="none")
@@ -1404,11 +1760,31 @@ def _loss(out: dict, targets: dict, pos_weight: torch.Tensor,
 
 
 def collect_predictions(model: BCPolicyNet, samples: dict, mean, std,
-                        device: str = "cpu", batch: int = 256) -> dict:
+                        device: str = "cpu", batch: int = 256,
+                        vocab: ActionVocab | None = None) -> dict:
     """Predictions for the first action of every chunk."""
     ds = WindowDataset(samples, mean, std)
     loader = DataLoader(ds, batch_size=batch, shuffle=False, num_workers=0)
     model.eval()
+    if model.cfg.action_mode == "vocab":
+        if vocab is None:
+            raise ValueError("vocab predictions need the ActionVocab")
+        toks, pvs, tvs = [], [], []
+        with torch.no_grad():
+            for obs, prev, targets, _w in loader:
+                out = model(obs.to(device), prev.to(device))
+                toks.append(torch.argmax(out["action"][:, 0], dim=-1).cpu().numpy())
+                pvs.append(prev.numpy())
+                tvs.append(np.asarray(targets["action"])[:, 0])
+        tokens = np.concatenate(toks) if toks else np.zeros(0, np.int64)
+        pvec = (np.concatenate(pvs) if pvs
+                else np.zeros((0, model.cfg.prev_dim), np.float32))
+        btns, d, m = decode_tokens(tokens, pvec, vocab)
+        return {"buttons": btns, "stick_dir": d, "stick_mag": m,
+                "stick_bin": d, "stick": dir_to_xy(d, m),
+                "tokens": tokens,
+                "target_tokens": (np.concatenate(tvs) if tvs
+                                  else np.zeros(0, np.int64))}
     mode = model.cfg.stick_mode
     bp, sb, cb, tr, sl, sm = [], [], [], [], [], []
     with torch.no_grad():
@@ -1522,6 +1898,7 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
           return_gamma: float = 0.995, weight_quantile: float = 0.5,
           weight_min: float = 0.1, weight_max: float = 10.0,
           reward_scale: float = 0.01, window_dtype: str = "float32",
+          dedupe: bool = True,
           log=print) -> tuple[dict, dict]:
     """Train from a recording directory; returns ``(checkpoint, metrics)``.
 
@@ -1540,7 +1917,7 @@ def train(data_dir: str, out: str, cfg: BCConfig | None = None,
                       return_gamma=return_gamma,
                       weight_quantile=weight_quantile, weight_min=weight_min,
                       weight_max=weight_max, reward_scale=reward_scale,
-                      window_dtype=window_dtype, log=log)
+                      window_dtype=window_dtype, dedupe=dedupe, log=log)
     finally:
         torch.set_num_threads(old)
 
@@ -1555,9 +1932,22 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
            return_beta: float = 0.0, return_gamma: float = 0.995,
            weight_quantile: float = 0.5, weight_min: float = 0.1,
            weight_max: float = 10.0, reward_scale: float = 0.01,
-           window_dtype: str = "float32",
+           window_dtype: str = "float32", dedupe: bool = True,
            log=print) -> tuple[dict, dict]:
     cfg = cfg or BCConfig()
+    if cfg.action_mode not in ("heads", "vocab"):
+        raise ValueError(f"action_mode must be heads or vocab, got "
+                         f"{cfg.action_mode!r}")
+    if cfg.damage_mode not in ("raw", "bucket", "none"):
+        raise ValueError(f"damage_mode must be raw, bucket or none, got "
+                         f"{cfg.damage_mode!r}")
+    if cfg.label_mode not in ("single", "hold"):
+        raise ValueError(f"label_mode must be single or hold, got "
+                         f"{cfg.label_mode!r}")
+    if cfg.action_mode == "vocab" and cfg.stick_mode != "dir":
+        # The vocabulary encodes discrete directions; grid stick decoding
+        # would also break the stick metrics.
+        cfg = replace(cfg, stick_mode="dir")
     if dropout is not None:
         cfg = replace(cfg, dropout=float(dropout))
     if not (0.0 <= cfg.dropout < 1.0):
@@ -1574,12 +1964,14 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     episodes = load_episodes(data_dir, player=cfg.player, limit=limit,
                              normalize_obs=cfg.obs_normalize,
                              shield_from_status=cfg.shield_from_status,
+                             damage_mode=cfg.damage_mode, dedupe=dedupe,
                              log=log)
     gaps = sum(int(ep.meta.get("seq_gaps", 0)) for ep in episodes)
     if gaps:
         log(f"[bc] warning: {gaps} reader-frame sequence gaps across the "
             "recordings; every-5th-sample resampling is approximate there")
-    episodes = [resample_episode(ep, cfg.frame_skip) for ep in episodes]
+    episodes = [resample_episode(ep, cfg.frame_skip, label_mode=cfg.label_mode)
+                for ep in episodes]
     episodes = [ep for ep in episodes
                 if len(ep.obs) >= cfg.window + cfg.horizon - 1]
     if not episodes:
@@ -1592,6 +1984,15 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     test_eps = [episodes[i] for i in te_idx]
     log(f"[bc] {n} episodes: train {len(train_eps)}, val {len(val_eps)}, "
         f"test {len(test_eps)} (episode-level split)")
+
+    vocab = None
+    if cfg.action_mode == "vocab":
+        # Built from the training actions (recorded and mirrored) so the
+        # vocabulary can express anything the mirror augmentation produces.
+        vocab = ActionVocab.build(train_eps, size=cfg.vocab_size)
+        cfg = replace(cfg, vocab_size=vocab.size)
+        log(f"[bc] action vocabulary: {vocab.size - 1} observed tuples + "
+            f"repeat token ({vocab.size} classes)")
 
     shield_labels = {
         "from_status": bool(cfg.shield_from_status),
@@ -1616,7 +2017,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
                     weight_max=weight_max, reward_scale=reward_scale,
                     window_dtype=dtype)
     train_samples = samples_for(train_eps, cfg, mirror=mirror,
-                                ego_swap=ego_swap, **weighted)
+                                ego_swap=ego_swap, vocab=vocab, **weighted)
     if return_beta > 0 and "weights" in train_samples:
         w = np.asarray(train_samples["weights"], np.float32)
         log(f"[bc] conservative return weighting: beta {return_beta:g}, gamma "
@@ -1625,8 +2026,10 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
             f"p10 {np.percentile(w, 10):.3f} p90 {np.percentile(w, 90):.3f} "
             f"max {w.max():.3f}")
 
-    val_samples = samples_for(val_eps, cfg, mirror=False, **weighted)
-    test_samples = samples_for(test_eps, cfg, mirror=False, **weighted)
+    val_samples = samples_for(val_eps, cfg, mirror=False, vocab=vocab,
+                              **weighted)
+    test_samples = samples_for(test_eps, cfg, mirror=False, vocab=vocab,
+                               **weighted)
     log(f"[bc] samples: train {len(train_samples['windows'])}, "
         f"val {len(val_samples['windows'])}, test {len(test_samples['windows'])}")
 
@@ -1696,7 +2099,8 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         train_loss = total / max(1, seen)
         val_loss = _eval_loss(model, val_samples, mean, std, pos_weight,
                               cfg, device, batch)
-        vpred = collect_predictions(model, val_samples, mean, std, device, batch)
+        vpred = collect_predictions(model, val_samples, mean, std, device,
+                                    batch, vocab=vocab)
         vmet = compute_metrics(vpred, first_actions(val_samples), None,
                                prev=val_samples["prev"], mode=cfg.stick_mode)
         f1_act = float(vmet["mean_f1_active"])
@@ -1738,20 +2142,28 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     log(f"[bc] selected epoch {best_epoch}/{epochs_run} "
         f"(val {best_val:.4f}, {len(history)} epochs run"
         + (", early stop)" if stopped_early else ")"))
-    val_pred = collect_predictions(model, val_samples, mean, std, device, batch)
-    thresholds = calibrate_thresholds(val_pred["buttons"],
-                                      first_actions(val_samples)["buttons"])
+    val_pred = collect_predictions(model, val_samples, mean, std, device,
+                                   batch, vocab=vocab)
+    train_pred = collect_predictions(model, train_samples, mean, std, device,
+                                     batch, vocab=vocab)
+    test_pred = collect_predictions(model, test_samples, mean, std, device,
+                                    batch, vocab=vocab)
+    if cfg.action_mode == "vocab":
+        # The token head is already a calibrated categorical distribution;
+        # per-button thresholds would only distort the decoded action.
+        thresholds = np.full(N_BUTTONS, 0.5, np.float32)
+    else:
+        thresholds = calibrate_thresholds(val_pred["buttons"],
+                                         first_actions(val_samples)["buttons"])
     metrics = {
         "train": compute_metrics(
-            collect_predictions(model, train_samples, mean, std, device, batch),
-            first_actions(train_samples), thresholds, prev=train_samples["prev"],
-            mode=cfg.stick_mode),
+            train_pred, first_actions(train_samples), thresholds,
+            prev=train_samples["prev"], mode=cfg.stick_mode),
         "val": compute_metrics(val_pred, first_actions(val_samples), thresholds,
                                prev=val_samples["prev"], mode=cfg.stick_mode),
         "test": compute_metrics(
-            collect_predictions(model, test_samples, mean, std, device, batch),
-            first_actions(test_samples), thresholds, prev=test_samples["prev"],
-            mode=cfg.stick_mode),
+            test_pred, first_actions(test_samples), thresholds,
+            prev=test_samples["prev"], mode=cfg.stick_mode),
         "baseline": {
             "train": copy_last_metrics(train_samples, cfg.stick_mode),
             "val": copy_last_metrics(val_samples, cfg.stick_mode),
@@ -1766,6 +2178,11 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         "alignment": {"seq_gaps": gaps, "ok": gaps == 0,
                       "frame_skip": cfg.frame_skip},
         "shield_from_status": bool(cfg.shield_from_status),
+        "damage_mode": cfg.damage_mode,
+        "label_mode": cfg.label_mode,
+        "action_mode": cfg.action_mode,
+        "vocab_size": int(cfg.vocab_size),
+        "dedupe": bool(dedupe),
         "shield_labels": shield_labels,
         "pos_weight": pos_weight.cpu().numpy().tolist(),
         # The train/val/test metrics above are all computed with the restored
@@ -1781,18 +2198,44 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         "weight_decay": float(weight_decay),
         "dropout": float(cfg.dropout),
     }
+    if cfg.action_mode == "vocab":
+        # Token-level view of the same predictions (repeat = "hold").
+        split_tokens = {}
+        for name, pred in (("train", train_pred), ("val", val_pred),
+                           ("test", test_pred)):
+            got = np.asarray(pred.get("tokens", []), np.int64)
+            want = np.asarray(pred.get("target_tokens", []), np.int64)
+            split_tokens[name] = {
+                "accuracy": float(np.mean(got == want)) if len(want) else 0.0,
+                "pred_repeat_rate": float(np.mean(got == REPEAT_TOKEN))
+                                    if len(got) else 0.0,
+                "expert_repeat_rate": float(np.mean(want == REPEAT_TOKEN))
+                                      if len(want) else 0.0,
+            }
+        metrics["action_tokens"] = split_tokens
+        log("[bc] token accuracy: " + "  ".join(
+            f"{name} {d['accuracy']:.3f} (repeat pred {d['pred_repeat_rate']:.3f}"
+            f"/ expert {d['expert_repeat_rate']:.3f})"
+            for name, d in split_tokens.items()))
     checkpoint = {
         "format": "ssbu_bc_v1",
         "config": cfg.to_dict(),
         "state_dict": model.state_dict(),
         "norm": {"mean": mean.tolist(), "std": std.tolist()},
         "thresholds": thresholds.tolist(),
+        "vocab": vocab.to_dict() if vocab is not None else None,
         "pos_weight": metrics["pos_weight"],
         "metrics": {k: metrics[k] for k in ("train", "val", "test")},
         "expert_stats": metrics["expert_stats"],
         "split": metrics["split"],
         "alignment": metrics["alignment"],
         "shield_from_status": metrics["shield_from_status"],
+        "damage_mode": metrics["damage_mode"],
+        "label_mode": metrics["label_mode"],
+        "action_mode": metrics["action_mode"],
+        "vocab_size": metrics["vocab_size"],
+        "dedupe": metrics["dedupe"],
+        "action_tokens": metrics.get("action_tokens"),
         "shield_labels": metrics["shield_labels"],
         "best_epoch": metrics["best_epoch"],
         "best_val_loss": metrics["best_val_loss"],
@@ -1957,8 +2400,10 @@ def load_checkpoint(path: str) -> dict:
 
 
 def load_policy(path: str, device: str = "cpu",
-                sample: bool = False) -> BCPolicy:
-    return BCPolicy(load_checkpoint(path), device=device, sample=sample)
+                sample: bool = False,
+                temperature: float = 1.0) -> BCPolicy:
+    return BCPolicy(load_checkpoint(path), device=device, sample=sample,
+                    temperature=temperature)
 
 
 # ---------------------------------------------------------------------------
@@ -1995,7 +2440,25 @@ def main(argv: list[str] | None = None) -> int:
                          "actions from the other player): 2x more data")
     ap.add_argument("--stick-mode", choices=("dir", "grid"), default="dir",
                     help="dir = 9 directions + 3 magnitudes (the expert stick is "
-                         "binary); grid = the old 9x9 heatmap")
+                         "binary); grid = the old 9x9 heatmap (vocab forces dir)")
+    ap.add_argument("--action-mode", choices=("heads", "vocab"), default="heads",
+                    help="heads = per-button sigmoids + stick heads; vocab = one "
+                         "softmax over the observed joint action tuples plus a "
+                         "repeat token (mutually exclusive, multimodal)")
+    ap.add_argument("--vocab-size", type=int, default=64,
+                    help="max observed tuples kept in the vocabulary (the repeat "
+                         "token is extra)")
+    ap.add_argument("--damage-mode", choices=("raw", "bucket", "none"),
+                    default="raw",
+                    help="raw percent; bucket = 10%% buckets (20 values); "
+                         "none = zeroed")
+    ap.add_argument("--label-mode", choices=("single", "hold"), default="single",
+                    help="single = label the decision frame; hold = OR the "
+                         "buttons over the frames the pad is actually held for")
+    ap.add_argument("--no-dedupe", action="store_true",
+                    help="keep episodes with identical recorded content (the "
+                         "default drops them so duplicates cannot straddle the "
+                         "train/val split)")
     ap.add_argument("--transition-weight", type=float, default=1.0,
                     help="sampling weight for decisions that differ from the "
                          "previous action (1.0 = off)")
@@ -2045,7 +2508,9 @@ def main(argv: list[str] | None = None) -> int:
                    stick_mode=args.stick_mode,
                    transition_weight=float(args.transition_weight),
                    obs_normalize=args.obs_normalize, dropout=args.dropout,
-                   shield_from_status=not args.no_shield_from_status)
+                   shield_from_status=not args.no_shield_from_status,
+                   action_mode=args.action_mode, vocab_size=args.vocab_size,
+                   damage_mode=args.damage_mode, label_mode=args.label_mode)
     # Progress goes to stderr so `--json` stays machine-readable on stdout.
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     if args.overfit:
@@ -2085,7 +2550,8 @@ def main(argv: list[str] | None = None) -> int:
                           weight_min=args.weight_clip[0],
                           weight_max=args.weight_clip[1],
                           reward_scale=args.reward_scale,
-                          window_dtype=args.window_dtype, log=log)
+                          window_dtype=args.window_dtype,
+                          dedupe=not args.no_dedupe, log=log)
     summary = {
         "checkpoint": os.path.abspath(args.out),
         "best_epoch": metrics["best_epoch"],

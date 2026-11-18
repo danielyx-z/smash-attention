@@ -591,6 +591,9 @@ class SSBUGymEnv(gym.Env):
     normalize_obs:
         ``False`` (default) = raw physical values; ``True`` = profile v1
         divisors (see :mod:`gym_obs`).
+    damage_mode:
+        ``"raw"`` (default) = damage in percent; ``"bucket"`` = 10 % bucket
+        index; ``"none"`` = zeroed.  Must match the checkpoint's training mode.
     macro_mode:
         Use ``Discrete(len(MACROS))`` instead of the buttons/stick Dict space.
     ego_slot:
@@ -628,6 +631,7 @@ class SSBUGymEnv(gym.Env):
         reward_mode: str = "none",
         reward_config: gym_reward.RewardConfig | None = None,
         normalize_obs: bool = False,
+        damage_mode: str = "raw",
         macro_mode: bool = False,
         ego_slot: int = 0,
         frame_timeout: float = 2.0,
@@ -653,6 +657,9 @@ class SSBUGymEnv(gym.Env):
             raise ValueError("spawn_stable_frames must be >= 1")
         if int(stock_zero_frames) < 1:
             raise ValueError("stock_zero_frames must be >= 1")
+        if damage_mode not in gym_obs.DAMAGE_MODES:
+            raise ValueError(f"damage_mode must be one of "
+                             f"{gym_obs.DAMAGE_MODES}, got {damage_mode!r}")
 
         self.shm_path = str(shm_path)
         self.frame_skip = int(frame_skip)
@@ -664,6 +671,7 @@ class SSBUGymEnv(gym.Env):
         self.reward_config = reward_config or gym_reward.RewardConfig()
         self.ego_slot = int(ego_slot)
         self.normalize_obs = bool(normalize_obs)
+        self.damage_mode = str(damage_mode)
         self.macro_mode = bool(macro_mode)
         self.frame_timeout = float(frame_timeout)
         self.reset_timeout = float(reset_timeout)
@@ -681,7 +689,8 @@ class SSBUGymEnv(gym.Env):
         self._slot_stock_warned: list[bool] = [False] * MAX_FIGHTERS
         self._last_stock_stamp: tuple[int, int] | None = None
 
-        self.obs_builder = gym_obs.PolicyObservation(normalize=self.normalize_obs)
+        self.obs_builder = gym_obs.PolicyObservation(
+            normalize=self.normalize_obs, damage_mode=self.damage_mode)
         self.observation_space: spaces.Box = gym_obs.observation_space(self.normalize_obs)
         self.action_space: spaces.Space = gym_action.make_action_space(self.macro_mode)
         self.render_mode = None

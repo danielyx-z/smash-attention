@@ -40,6 +40,13 @@ from gymnasium import spaces
 # --------------------------------------------------------------------------
 # layout
 # --------------------------------------------------------------------------
+#: Damage is recorded in percent.  ``damage_mode="bucket"`` replaces it with
+#: a 10 % bucket index (0..19) so 83 % and 87 % are the same input; ``"none"``
+#: zeroes the slot.  Training must use the same mode as the live env.
+DAMAGE_BUCKET = 10.0
+DAMAGE_BUCKETS = 20
+DAMAGE_MODES = ("raw", "bucket", "none")
+
 #: (field name, divisor used when ``normalize=True``) in profile order.
 SCALAR_FIELDS: tuple[tuple[str, float], ...] = (
     ("x", 100.0),
@@ -215,7 +222,14 @@ def _action_onehot(state: Any) -> np.ndarray:
     return onehot
 
 
-def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray) -> None:
+def damage_bucket(value: Any) -> float:
+    """10 % damage bucket index, clipped to ``DAMAGE_BUCKETS - 1``."""
+    v = _number(value)
+    return float(min(max(math.floor(v / DAMAGE_BUCKET), 0), DAMAGE_BUCKETS - 1))
+
+
+def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray,
+                    damage_mode: str = "raw") -> None:
     if not fighter_valid(fighter):
         out.fill(0.0)          # empty slot: no WAIT one-hot, all zeros
         return
@@ -223,7 +237,12 @@ def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray) -> None:
     pos = 0
     for name, scale in SCALAR_FIELDS:
         value = _number(fighter.get(name, 0.0))
-        out[pos] = value / scale if normalize else value
+        if name == "damage" and damage_mode != "raw":
+            if damage_mode == "bucket":
+                out[pos] = damage_bucket(value)
+            # "none": leave the slot at zero
+        else:
+            out[pos] = value / scale if normalize else value
         pos += 1
 
     out[pos:pos + ACTION_ONEHOT_SIZE] = _action_onehot(fighter.get("action_state", -1))
@@ -277,12 +296,16 @@ class PolicyObservation:
     size = OBS_SIZE
     dtype = OBS_DTYPE
 
-    def __init__(self, normalize: bool = False):
+    def __init__(self, normalize: bool = False, damage_mode: str = "raw"):
+        if damage_mode not in DAMAGE_MODES:
+            raise ValueError(f"damage_mode must be one of {DAMAGE_MODES}, "
+                             f"got {damage_mode!r}")
         self.normalize = bool(normalize)
+        self.damage_mode = str(damage_mode)
 
     def per_fighter(self, fighter: dict) -> np.ndarray:
         out = np.zeros(PER_FIGHTER_SIZE, dtype=OBS_DTYPE)
-        _fighter_vector(fighter, self.normalize, out)
+        _fighter_vector(fighter, self.normalize, out, self.damage_mode)
         return out
 
     def build(self, snapshot: Any) -> np.ndarray:
@@ -291,16 +314,19 @@ class PolicyObservation:
         obs = np.zeros(OBS_SIZE, dtype=OBS_DTYPE)
         for i in range(N_FIGHTERS):
             fighter = fighters[i] if i < len(fighters) else {}
-            _fighter_vector(fighter, self.normalize, obs[i * PER_FIGHTER_SIZE:
-                                                           (i + 1) * PER_FIGHTER_SIZE])
+            _fighter_vector(fighter, self.normalize,
+                            obs[i * PER_FIGHTER_SIZE:(i + 1) * PER_FIGHTER_SIZE],
+                            self.damage_mode)
         return obs
 
     __call__ = build
 
 
-def build_observation(snapshot: Any, normalize: bool = False) -> np.ndarray:
+def build_observation(snapshot: Any, normalize: bool = False,
+                      damage_mode: str = "raw") -> np.ndarray:
     """Convenience wrapper around :class:`PolicyObservation`."""
-    return PolicyObservation(normalize=normalize).build(snapshot)
+    return PolicyObservation(normalize=normalize,
+                             damage_mode=damage_mode).build(snapshot)
 
 
 def observation_metadata() -> dict:

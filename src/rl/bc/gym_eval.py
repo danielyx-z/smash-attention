@@ -190,6 +190,7 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
         # decision interval (reader frames per step).  Fall back for older env
         # constructors that lack some of these keywords.
         kwargs = {"normalize_obs": cfg.obs_normalize,
+                  "damage_mode": getattr(cfg, "damage_mode", "raw"),
                   "frame_skip": cfg.frame_skip, "max_steps": max_steps}
         if input_adapter is not None:
             kwargs["input_adapter"] = input_adapter
@@ -207,7 +208,9 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
                         "the adapter assumes a no-argument constructor")
                     raise SystemExit(2)
         log(f"[eval] env config: frame_skip={cfg.frame_skip} "
-            f"normalize_obs={cfg.obs_normalize} max_steps={max_steps}")
+            f"normalize_obs={cfg.obs_normalize} "
+            f"damage_mode={getattr(cfg, 'damage_mode', 'raw')} "
+            f"max_steps={max_steps}")
         return env, False
     return MockEnv(max_steps=max_steps, seed=seed), True
 
@@ -575,8 +578,11 @@ def compare_stats(policy_stats: dict, expert_stats: dict) -> dict:
 def expert_stats_from_data(data_dir: str, cfg: bc.BCConfig) -> dict:
     episodes = bc.load_episodes(data_dir, player=cfg.player,
                                 normalize_obs=cfg.obs_normalize,
-                                shield_from_status=cfg.shield_from_status)
-    episodes = [bc.resample_episode(ep, cfg.frame_skip) for ep in episodes]
+                                shield_from_status=cfg.shield_from_status,
+                                damage_mode=cfg.damage_mode)
+    episodes = [bc.resample_episode(ep, cfg.frame_skip,
+                                    label_mode=cfg.label_mode)
+                for ep in episodes]
     samples = bc.samples_for(episodes, cfg, mirror=False)
     return bc.dataset_action_stats(samples)
 
@@ -599,6 +605,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="walk boot -> match with the policy pad first (the pad "
                          "joins player 1 and drives the menus; needs the game "
                          "started with SSBU_KEYBOARD_PLAYER=0)")
+    ap.add_argument("--temperature", type=float, default=1.0,
+                    help="softmax temperature for --sample (vocab checkpoints; "
+                         "<1 = more committed)")
     ap.add_argument("--sample", action="store_true",
                     help="draw actions from the predicted distribution instead "
                          "of the argmax: keeps a drifted BC policy moving")
@@ -630,16 +639,24 @@ def main(argv: list[str] | None = None) -> int:
 
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     policy = bc.load_policy(args.model, device=args.device,
-                            sample=bool(args.sample))
+                            sample=bool(args.sample),
+                            temperature=args.temperature)
     cfg = policy.cfg
     if args.button_threshold is not None:
-        policy.thresholds = np.full(bc.N_BUTTONS, float(args.button_threshold),
-                                    np.float32)
-        log(f"[eval] button thresholds forced to {args.button_threshold:.2f}")
+        if cfg.action_mode == "vocab":
+            log("[eval] warning: --button-threshold has no effect on a vocab "
+                "checkpoint (the token head decodes whole actions)")
+        else:
+            policy.thresholds = np.full(bc.N_BUTTONS,
+                                        float(args.button_threshold), np.float32)
+            log(f"[eval] button thresholds forced to "
+                f"{args.button_threshold:.2f}")
     log(f"[eval] checkpoint config: window={cfg.window} horizon={cfg.horizon} "
         f"frame_skip={cfg.frame_skip} obs_normalize={cfg.obs_normalize} "
         f"trigger={cfg.trigger} cstick={cfg.cstick} dropout={cfg.dropout} "
-        f"shield_from_status={cfg.shield_from_status}")
+        f"shield_from_status={cfg.shield_from_status} "
+        f"action_mode={cfg.action_mode} damage_mode={cfg.damage_mode} "
+        f"label_mode={cfg.label_mode}")
     if args.cstick and not cfg.cstick:
         log("[eval] warning: --cstick given but this checkpoint has no "
             "C-stick head; using the checkpoint config")
