@@ -49,6 +49,12 @@ class RewardConfig:
     loss_penalty: float = -1.0
     draw_reward: float = 0.0
     ego_slot: int = DEFAULT_EGO_SLOT
+    #: Small per-decision penalty while the ego is offstage (not on the
+    #: revival platform).  It discourages walking/drifting off the edge
+    #: without matching the full stock penalty.
+    offstage_penalty: float = 0.0
+    stage_half_width: float = 100.0
+    stage_top: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -61,6 +67,9 @@ class RewardConfig:
             "loss_penalty": self.loss_penalty,
             "draw_reward": self.draw_reward,
             "ego_slot": self.ego_slot,
+            "offstage_penalty": self.offstage_penalty,
+            "stage_half_width": self.stage_half_width,
+            "stage_top": self.stage_top,
         }
 
 
@@ -114,6 +123,22 @@ def _rebirth(fighter: dict) -> bool:
         return False
 
 
+def _offstage(fighter: dict, cfg: "RewardConfig") -> bool:
+    """True when the fighter is airborne beyond the assumed stage bounds."""
+    if _rebirth(fighter):
+        return False
+    try:
+        airborne = int(fighter.get("on_ground", 0)) == 0
+    except (TypeError, ValueError):
+        airborne = False
+    if not airborne:
+        return False
+    x = _number(fighter, "x")
+    y = _number(fighter, "y")
+    return abs(x) > float(cfg.stage_half_width) or \
+        y < float(cfg.stage_top) - 10.0
+
+
 def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
                    ego_slot: int | None = None) -> float:
     """Combat reward for the transition ``prev -> curr``.
@@ -144,6 +169,8 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     taken = max(0.0, _number(cf_ego, "damage") - _number(pf_ego, "damage"))
     reward = cfg.damage_scale * (cfg.damage_dealt * dealt
                                  - cfg.damage_taken * taken)
+    if cfg.offstage_penalty and _offstage(cf_ego, cfg):
+        reward -= float(cfg.offstage_penalty)
 
     # stock / KO deltas
     prev_stock_ego, stock_ego = _stock(pf_ego), _stock(cf_ego)

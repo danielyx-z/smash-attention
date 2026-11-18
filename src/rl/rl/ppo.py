@@ -644,6 +644,7 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "kl_coef": float(getattr(args, "kl_coef", 0.0)),
             "kl_model": getattr(args, "kl_model", None),
             "stock_value": float(getattr(args, "stock_value", 0.0)),
+            "offstage_penalty": float(getattr(args, "offstage_penalty", 0.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
             "saved_ns": time.time_ns(),
         },
@@ -690,6 +691,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stock-value", type=float, default=1.0,
                     help="reward units for each lost/earned stock "
                          "(1.0 = 100%% damage; 0 disables stock terms)")
+    ap.add_argument("--offstage-penalty", type=float, default=0.0,
+                    help="small per-decision reward penalty while the ego is "
+                         "offstage (e.g. 0.005)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save-every", type=int, default=1)
     ap.add_argument("--stats-file", default="/tmp/ssbu_training_stats.json",
@@ -725,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--stock-value must be >= 0")
     if int(args.max_dead_episodes) < 0:
         ap.error("--max-dead-episodes must be >= 0")
+    if float(args.offstage_penalty) < 0.0:
+        ap.error("--offstage-penalty must be >= 0")
 
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     torch.manual_seed(ppo.seed)
@@ -782,7 +788,7 @@ def main(argv: list[str] | None = None) -> int:
                 damage_scale=0.01, damage_dealt=1.0, damage_taken=1.0,
                 ko_bonus=stock_value, stock_loss=-stock_value,
                 win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
-                ego_slot=0)
+                ego_slot=0, offstage_penalty=float(args.offstage_penalty))
             reset_fn = None
             try:
                 from rl.input.gym_reset import ResetClient

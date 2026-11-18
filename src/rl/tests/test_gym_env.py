@@ -527,6 +527,25 @@ class TestReward(unittest.TestCase):
         cfg = gym_reward.RewardConfig(draw_reward=0.5)
         self.assertAlmostEqual(gym_reward.compute_reward(prev, curr, cfg), 0.5)
 
+    def test_offstage_penalty(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0, offstage_penalty=0.05)
+        prev = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        off = snap([fighter(x=130.0, y=-20.0, on_ground=0),
+                    fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(gym_reward.compute_reward(prev, off, cfg), -0.05)
+        on = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                   fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(gym_reward.compute_reward(prev, on, cfg), 0.0)
+        # A fighter on the revival platform is not penalized.
+        rebirth = snap([fighter(x=130.0, y=-20.0, on_ground=0,
+                                is_on_rebirth=1),
+                        fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, rebirth, cfg), 0.0)
+
     def test_rebirth_detects_stock_loss_when_stock_unreadable(self):
         cfg = gym_reward.RewardConfig(ko_bonus=1.0, stock_loss=-1.0,
                                       win_bonus=0.0, loss_penalty=0.0)
