@@ -76,7 +76,7 @@ if [[ $ATTACH -eq 0 ]]; then
     EXTRA_ENV=()
     while IFS= read -r kv; do
         [[ -n "$kv" ]] && EXTRA_ENV+=(--env "$kv")
-    done < <(env | grep -E '^SSBU_' | grep -vE '^SSBU_LIVE_')
+    done < <(env | grep -E '^SSBU_' | grep -vE '^SSBU_LIVE_|^SSBU_READER_FPS=')
     setsid nohup bash -c 'cd "$1" && shift && exec "$@"' _ "$REPO" \
         ./play.sh \
         --env SSBU_SKIP_MOVIES=1 \
@@ -114,8 +114,13 @@ if [[ -n "${SSBU_LIVE_RECORD:-}" ]]; then
 fi
 
 # -- reader + verifier ------------------------------------------------------
-echo "starting reader (log: ~/ssbu_reader.log)"
-setsid nohup "$PY" -m rl.memory.reader \
+# At SSBU_SPEED=n the game presents n*60 frames/s.  The reader must sample at
+# that rate too, otherwise env frame_skip counts skipped game frames and the
+# policy sees a coarser, shifted action interval.
+SPEED="${SSBU_SPEED:-1}"
+READER_FPS="${SSBU_READER_FPS:-$(awk -v s="$SPEED" 'BEGIN { print (s > 0 ? 60*s : 60) }')}"
+echo "starting reader at ${READER_FPS} fps (log: ~/ssbu_reader.log)"
+setsid nohup "$PY" -m rl.memory.reader --fps "$READER_FPS" \
     > "$HOME/ssbu_reader.log" 2>&1 < /dev/null &
 disown
 

@@ -20,6 +20,7 @@ MODEL="$RLROOT/data/models/bc_dk9_30hz_vocab_egoswap.pt"
 OUT="$RLROOT/data/models/rl_dk9_ppo.pt"
 MATCH="${SSBU_LIVE_MATCH:-p1=donkey,p1=human,p2=donkey,p2=cpu,cpu=9,stage=end,players=2,stock=255,time=999,items=off,hazards=off}"
 BOOT=1
+SPEED="${SSBU_SPEED:-1}"
 ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -27,6 +28,7 @@ while [[ $# -gt 0 ]]; do
         --out)    OUT="$2"; shift 2 ;;
         --match)  MATCH="$2"; shift 2 ;;
         --attach) BOOT=0; shift ;;
+        --speed)  SPEED="$2"; shift 2 ;;
         --help|-h) sed -n '2,14p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *)        ARGS+=("$1"); shift ;;
     esac
@@ -35,6 +37,7 @@ done
 export SSBU_KEYBOARD_PLAYER=0
 export SSBU_INPUT_NO_FOCUS=1
 export SSBU_RL_MODE=1
+export SSBU_SPEED="$SPEED"
 unset SSBU_SEQ SSBU_PLAY SSBU_PRESS SSBU_SCRIPT
 
 CPU_LEVEL="$(printf '%s' "$MATCH" | sed -n 's/.*cpu=\([0-9][0-9]*\).*/\1/p' | tail -1)"

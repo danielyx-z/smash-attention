@@ -26,12 +26,14 @@ PY="$RLROOT/.venv/bin/python"
 MODEL="$RLROOT/data/models/bc_dk9_dir200.pt"
 MATCH="${SSBU_LIVE_MATCH:-p1=donkey,p1=human,p2=donkey,p2=cpu,cpu=9,stage=end,players=2,stock=255,time=999,items=off,hazards=off}"
 BOOT=1
+SPEED="${SSBU_SPEED:-1}"
 ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --model)  MODEL="$2"; shift 2 ;;
         --match)  MATCH="$2"; shift 2 ;;
         --attach) BOOT=0; shift ;;
+        --speed)  SPEED="$2"; shift 2 ;;
         --help|-h) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *)        ARGS+=("$1"); shift ;;
     esac
@@ -40,6 +42,7 @@ done
 export SSBU_KEYBOARD_PLAYER=0          # free player 1 for the policy pad
 export SSBU_INPUT_NO_FOCUS=1           # no focus keeper, no clicking
 export SSBU_RL_MODE=1                  # direct in-fight rematch
+export SSBU_SPEED="$SPEED"             # game presentation speed (reader follows)
 unset SSBU_SEQ SSBU_PLAY SSBU_PRESS SSBU_SCRIPT   # the pad drives the menus
 
 if [[ $BOOT -eq 1 ]]; then
