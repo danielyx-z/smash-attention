@@ -528,7 +528,7 @@ def compute_gae(rewards, values, next_values, terminals, truncateds,
 
 
 def batch_values(model, windows, prevs, mean, std, device: str,
-                 batch_size: int = 512) -> np.ndarray:
+                 batch_size: int = 128) -> np.ndarray:
     model.eval()
     out = []
     with torch.no_grad():
@@ -541,7 +541,7 @@ def batch_values(model, windows, prevs, mean, std, device: str,
 
 
 def batch_logits(model, windows, prevs, mean, std, device: str,
-                 batch_size: int = 512) -> np.ndarray:
+                 batch_size: int = 128) -> np.ndarray:
     """First-horizon token logits for a rollout, used by the BC KL anchor."""
     model.eval()
     out = []
@@ -719,6 +719,9 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(ppo.seed)
     np.random.seed(ppo.seed)
     device = str(ppo.device)
+    if device.startswith("cpu"):
+        # Leave CPU for the game/reader; four threads is enough for this GRU.
+        torch.set_num_threads(min(4, max(1, os.cpu_count() or 1)))
     model, cfg, vocab, mean, std, bc_ckpt = load_bc_model(
         args.model, device, dropout=args.dropout)
     model.to(device)
