@@ -756,6 +756,14 @@ class LiveView:
             losses = int(data.get("losses", 0) or 0)
             p1_deaths = int(data.get("p1_deaths", 0) or 0)
             p2_deaths = int(data.get("p2_deaths", 0) or 0)
+            cur_ep = int(data.get("current_episode", 0) or 0)
+            cur_steps = int(data.get("current_steps", 0) or 0)
+            cur_max = int(data.get("current_max_steps", 0) or 0)
+            cur_dealt = float(data.get("current_dealt", 0.0) or 0.0)
+            cur_taken = float(data.get("current_taken", 0.0) or 0.0)
+            cur_diff = float(data.get("current_diff", 0.0) or 0.0)
+            cur_p1d = int(data.get("current_p1_deaths", 0) or 0)
+            cur_p2d = int(data.get("current_p2_deaths", 0) or 0)
             mean_d = float(data.get("mean_dealt", 0.0) or 0.0)
             mean_t = float(data.get("mean_taken", 0.0) or 0.0)
             mean_diff = float(data.get("mean_diff", 0.0) or 0.0)
@@ -766,7 +774,10 @@ class LiveView:
                 f"TRAINING {state}   CPU{cpu}   iter {it}/{its}   eps {eps}",
                 f"positive {pos:5.1f}%   wins {wins} / losses {losses}   "
                 f"deaths P1 {p1_deaths} / P2 {p2_deaths}",
-                f"dealt {mean_d:6.1f}   taken {mean_t:6.1f}   "
+                f"current ep {cur_ep}   {cur_steps}/{cur_max or '?'} steps   "
+                f"dealt {cur_dealt:6.1f}   taken {cur_taken:6.1f}   "
+                f"diff {cur_diff:+6.1f}   deaths P1 {cur_p1d} / P2 {cur_p2d}",
+                f"mean dealt {mean_d:6.1f}   mean taken {mean_t:6.1f}   "
                 f"mean diff {mean_diff:+6.1f}   last {last_diff:+6.1f}",
                 f"PPO loss {float(data.get('policy_loss', 0.0) or 0.0):+.4f}   "
                 f"value {float(data.get('value_loss', 0.0) or 0.0):.4f}   "

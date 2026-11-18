@@ -101,6 +101,14 @@ class TrainingStats:
             "positive": 0,
             "p1_deaths": 0,
             "p2_deaths": 0,
+            "current_episode": 0,
+            "current_steps": 0,
+            "current_max_steps": 0,
+            "current_dealt": 0.0,
+            "current_taken": 0.0,
+            "current_diff": 0.0,
+            "current_p1_deaths": 0,
+            "current_p2_deaths": 0,
             "sum_dealt": 0.0,
             "sum_taken": 0.0,
             "sum_diff": 0.0,
@@ -138,10 +146,21 @@ class TrainingStats:
         except (OSError, TypeError, ValueError):
             pass
 
-    def record_step(self) -> None:
-        """Heartbeat so a 30 s episode does not look like a stalled run."""
+    def record_step(self, progress: dict | None = None) -> None:
+        """Live current-episode stats; throttle file writes to ~2 Hz."""
+        if progress:
+            self.data.update({
+                "current_episode": int(progress.get("episode", 0) or 0),
+                "current_steps": int(progress.get("steps", 0) or 0),
+                "current_max_steps": int(progress.get("max_steps", 0) or 0),
+                "current_dealt": float(progress.get("dealt", 0.0) or 0.0),
+                "current_taken": float(progress.get("taken", 0.0) or 0.0),
+                "current_diff": float(progress.get("diff", 0.0) or 0.0),
+                "current_p1_deaths": int(progress.get("p1_deaths", 0) or 0),
+                "current_p2_deaths": int(progress.get("p2_deaths", 0) or 0),
+            })
         now = time.time()
-        if now - self.last_beat >= 2.0:
+        if now - self.last_beat >= 0.5:
             self.last_beat = now
             self.data["updated"] = now
             self.flush()
@@ -150,6 +169,16 @@ class TrainingStats:
         self.data["episodes"] += 1
         self.data["p1_deaths"] += int(row.get("p1_deaths", 0) or 0)
         self.data["p2_deaths"] += int(row.get("p2_deaths", 0) or 0)
+        self.data.update({
+            "current_episode": 0,
+            "current_steps": 0,
+            "current_max_steps": 0,
+            "current_dealt": 0.0,
+            "current_taken": 0.0,
+            "current_diff": 0.0,
+            "current_p1_deaths": 0,
+            "current_p2_deaths": 0,
+        })
         p1, p2 = row.get("p1_damage"), row.get("p2_damage")
         if p1 is not None and p2 is not None:
             dealt, taken = float(p2), float(p1)
@@ -310,6 +339,20 @@ class MockCombatEnv(ge.MockEnv):
         return obs, reward, terminated, truncated, info
 
 
+def _damages(info: dict) -> list[float]:
+    """[P1_damage, P2_damage] from an env info dict."""
+    out = []
+    for fighter in (info.get("raw_fighters") or [])[:2]:
+        try:
+            out.append(float(fighter.get("damage", 0.0) or 0.0))
+        except (TypeError, ValueError, AttributeError):
+            out.append(0.0)
+    if len(out) < 2:
+        out = [float(info.get("p1_damage", 0.0) or 0.0),
+               float(info.get("p2_damage", 0.0) or 0.0)]
+    return out
+
+
 def _rebirth_flags(info: dict) -> list[bool]:
     """[P1_on_rebirth, P2_on_rebirth] from an env info dict."""
     out = []
@@ -326,7 +369,8 @@ def _rebirth_flags(info: dict) -> list[bool]:
 def _episode_row(info: dict, length: int, ret: float,
                  terminated: bool, truncated: bool,
                  peak: dict | None = None,
-                 deaths: dict | None = None) -> dict:
+                 deaths: dict | None = None,
+                 totals: dict | None = None) -> dict:
     """Summarize one episode.
 
     The last info frame can be a respawn with damage reset to 0, so the final
@@ -336,7 +380,13 @@ def _episode_row(info: dict, length: int, ret: float,
     r = ge._result_from_info(info)
     p1, p2 = r.get("p1_damage"), r.get("p2_damage")
     winner = r.get("winner")
-    if peak:
+    if totals:
+        # Cumulative damage actually applied during the episode (damage
+        # resets after a KO do not erase it).  This is the useful value for
+        # training averages; gym_eval still uses peak damage.
+        p1 = float(totals.get("taken", p1 or 0.0))
+        p2 = float(totals.get("dealt", p2 or 0.0))
+    elif peak:
         if p1 in (None, 0.0) and peak.get("p1_damage", 0.0) > 0.0:
             p1 = peak["p1_damage"]
         if p2 in (None, 0.0) and peak.get("p2_damage", 0.0) > 0.0:
@@ -364,8 +414,12 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     ep = 0
     ep_ret = 0.0
     ep_len = 0
+    ep_dealt = 0.0
+    ep_taken = 0.0
+    max_steps = int(getattr(env, "max_steps", 0) or 0)
     peak = {"p1_damage": 0.0, "p2_damage": 0.0}
     prev_rebirth = _rebirth_flags(info)
+    prev_damages = _damages(info)
     deaths = {"p1": 0, "p2": 0}
     while len(rewards) < steps:
         window = state.window().copy()
@@ -399,11 +453,25 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             if curr_rebirth[i] and not prev_rebirth[i]:
                 deaths[key] += 1
         prev_rebirth = curr_rebirth
+        curr_damages = _damages(info)
+        ep_taken += max(0.0, curr_damages[0] - prev_damages[0])
+        ep_dealt += max(0.0, curr_damages[1] - prev_damages[1])
+        prev_damages = curr_damages
         if on_step is not None:
-            on_step()
+            on_step({
+                "episode": ep + 1,
+                "steps": ep_len,
+                "max_steps": max_steps,
+                "dealt": ep_dealt,
+                "taken": ep_taken,
+                "diff": ep_dealt - ep_taken,
+                "p1_deaths": deaths["p1"],
+                "p2_deaths": deaths["p2"],
+            })
         if terminated or truncated:
-            row = _episode_row(info, ep_len, ep_ret,
-                               terminated, truncated, peak, deaths)
+            row = _episode_row(
+                info, ep_len, ep_ret, terminated, truncated, peak, deaths,
+                totals={"dealt": ep_dealt, "taken": ep_taken})
             episodes.append(row)
             if on_episode is not None:
                 on_episode(row)
@@ -413,8 +481,11 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             state.observe(ge._extract_obs(obs))
             ep_ret = 0.0
             ep_len = 0
+            ep_dealt = 0.0
+            ep_taken = 0.0
             peak = {"p1_damage": 0.0, "p2_damage": 0.0}
             prev_rebirth = _rebirth_flags(info)
+            prev_damages = _damages(info)
             deaths = {"p1": 0, "p2": 0}
     batch = {
         "windows": np.stack(windows).astype(np.float32),
