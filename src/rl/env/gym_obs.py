@@ -41,10 +41,12 @@ from gymnasium import spaces
 # layout
 # --------------------------------------------------------------------------
 #: Damage is recorded in percent.  ``damage_mode="bucket"`` replaces it with
-#: a 10 % bucket index (0..19) so 83 % and 87 % are the same input; ``"none"``
-#: zeroes the slot.  Training must use the same mode as the live env.
+#: a 10 % bucket index (0..20) so 83 % and 87 % are the same input.  Everything
+#: at 200 % or above shares the last bucket: knockback is already lethal there,
+#: so the exact percent adds nothing.  ``"none"`` zeroes the slot.  Training
+#: must use the same mode as the live env.
 DAMAGE_BUCKET = 10.0
-DAMAGE_BUCKETS = 20
+DAMAGE_BUCKETS = 21
 DAMAGE_MODES = ("raw", "bucket", "none")
 
 #: (field name, divisor used when ``normalize=True``) in profile order.

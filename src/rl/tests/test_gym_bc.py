@@ -1305,9 +1305,13 @@ class DamageBucketTest(unittest.TestCase):
         damage_index = [n for n, _ in bc.SCALAR_FIELDS].index("damage")
         self.assertEqual(obs[damage_index], 8.0)
         self.assertEqual(obs[bc.OBS_PER_FIGHTER + damage_index], 8.0)
-        raw[0, 0, bc.FIELD_INDEX["damage"]] = 1000.0
+        raw[0, 0, bc.FIELD_INDEX["damage"]] = 199.0
         obs = bc.obs_from_raw(raw, damage_mode="bucket")[0]
-        self.assertEqual(obs[damage_index], bc.DAMAGE_BUCKETS - 1.0)
+        self.assertEqual(obs[damage_index], 19.0)      # 190-199 is its own bucket
+        for top in (200.0, 234.0, 1000.0):
+            raw[0, 0, bc.FIELD_INDEX["damage"]] = top
+            obs = bc.obs_from_raw(raw, damage_mode="bucket")[0]
+            self.assertEqual(obs[damage_index], bc.DAMAGE_BUCKETS - 1.0, top)
 
     def test_raw_mode_default_is_unchanged(self):
         ep = bc.synthetic_episode(6, seed=1)

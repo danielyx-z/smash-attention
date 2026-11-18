@@ -1657,9 +1657,10 @@ Four dataset/head changes, trained on the same 100 episodes and with the same
   A and 56 % of B taps at 30 Hz. Raises the expert rates to A 4.36 %, B 0.75 %,
   Y 4.86 %, X 8.49 % (from 3.51/0.48/4.27/6.06).
 * **Damage buckets** (`--damage-mode bucket`): damage in the observation is a
-  10 % bucket index (20 values) instead of the raw percent. 83 % and 87 % are
-  the same input; the signal stays causal but stops being a near-unique sample
-  id. The live env takes the same mode from the checkpoint
+  10 % bucket index (21 values, 200 %+ is one bucket) instead of the raw
+  percent. 83 % and 87 % are the same input; the signal stays causal but stops
+  being a near-unique sample id. The data maxes out at 234 %, and only 0.4 % of
+  frames are at 190 %+, so the last bucket loses almost nothing. The live env takes the same mode from the checkpoint
   (`PolicyObservation(damage_mode=...)`).
 * **Content dedupe** (on by default): episodes whose `raw_fighters` hash equal
   are dropped before the limit, so identical recordings cannot straddle the

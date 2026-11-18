@@ -107,8 +107,9 @@ N_ACTIONS = STICK_BINS * STICK_BINS
 FRAME_SKIP = 5
 #: Damage is recorded as a percentage; "bucket" mode feeds the 10 % bucket
 #: index instead of the raw value so that 83 % and 87 % are the same input.
+#: 200 % and above is one bucket (index 20): knockback is lethal there anyway.
 DAMAGE_BUCKET = 10.0
-DAMAGE_BUCKETS = 20
+DAMAGE_BUCKETS = 21
 
 # Per-fighter observation layout (CONTRACTS.md profile v1).  Agent C's
 # gym_obs.py is the single source of truth for the value scaling and the
@@ -2450,8 +2451,8 @@ def main(argv: list[str] | None = None) -> int:
                          "token is extra)")
     ap.add_argument("--damage-mode", choices=("raw", "bucket", "none"),
                     default="raw",
-                    help="raw percent; bucket = 10%% buckets (20 values); "
-                         "none = zeroed")
+                    help="raw percent; bucket = 10%% buckets (21 values, "
+                         "200%%+ is one bucket); none = zeroed")
     ap.add_argument("--label-mode", choices=("single", "hold"), default="single",
                     help="single = label the decision frame; hold = OR the "
                          "buttons over the frames the pad is actually held for")
