@@ -770,7 +770,9 @@ def main(argv: list[str] | None = None) -> int:
                 input_adapter=pad)
             if pad is not None:
                 ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
-                if not ge.drive_menus(env, pad, args.menu_timeout, log=log):
+                game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
+                if not ge.drive_menus(env, pad, args.menu_timeout, log=log,
+                                      speed=game_speed):
                     log("[ppo] giving up: no fight")
                     return 2
         state = PolicyState(cfg)

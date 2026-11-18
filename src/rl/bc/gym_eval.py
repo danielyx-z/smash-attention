@@ -303,19 +303,25 @@ def _fight_on(env) -> bool:
         return False
 
 
-def drive_menus(env, pad, timeout: float = 120.0, log=print) -> bool:
+def drive_menus(env, pad, timeout: float = 120.0, log=print,
+                speed: float = 1.0) -> bool:
     """Walk boot -> match with ``pad``; True once the fight is on.
 
     The pad must be the one the policy will use: it joins player 1, and a human
     slot left without its controller is dropped back to the title by the game.
+    ``speed`` is the runtime ``SSBU_SPEED``: menu animations and loading runs
+    faster, so holds and waits are scaled by 1/speed (otherwise 4x overshoots
+    every screen and the macro loops in the menu).
     """
+    scale = 1.0 / max(1.0, float(speed))
     deadline = time.monotonic() + max(60.0, timeout)
     while not _state_ready(env):                 # the game may still be loading
         if time.monotonic() > deadline:
             log("[eval] menu walk: the state block never appeared")
             return False
         time.sleep(0.25)
-    log("[eval] menu walk: state block is live, pressing A through the menus")
+    log(f"[eval] menu walk: state block is live, pressing A through the menus "
+        f"(speed x{speed:g})")
     t0 = time.monotonic()
     cycle = 0
     while time.monotonic() - t0 < timeout:
@@ -327,8 +333,8 @@ def drive_menus(env, pad, timeout: float = 120.0, log=print) -> bool:
             if _fight_on(env):
                 log(f"[eval] menu walk: the fight is on after {time.monotonic() - t0:.0f}s")
                 return True
-            _pad_step(pad, keys, hold)
-            time.sleep(wait)
+            _pad_step(pad, keys, hold * scale)
+            time.sleep(max(0.03, wait * scale))
         log(f"[eval] menu walk: pass {cycle} did not reach the fight "
             f"({_brief_state(env)}), retrying")
     log(f"[eval] menu walk: no fight after {timeout:.0f}s")
@@ -692,7 +698,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if pad is not None:
             wait_for_pad(args.game_log, args.pad_timeout, log=log)
-        if pad is not None and not drive_menus(env, pad, args.menu_timeout, log=log):
+        game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
+        if pad is not None and not drive_menus(
+                env, pad, args.menu_timeout, log=log, speed=game_speed):
             log("[eval] giving up: the game is not in a fight (see the menu walk)")
             return 2
         result = run_episodes(env, ensemble, args.episodes, args.max_steps,
