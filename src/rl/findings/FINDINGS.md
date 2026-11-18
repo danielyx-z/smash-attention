@@ -1763,6 +1763,36 @@ select the best iteration instead of keeping the last one. A serious run needs
 more episodes per rollout (8-16), 200k+ decisions, and a BC-anchored KL term
 (or BC auxiliary loss) to prevent this kind of drift.
 
+### CPU3 PPO: dead episodes were a pad/rematch stall, not policy collapse
+
+The CPU3 PPO run initially looked like it collapsed: after three positive
+rollouts (+22.8, +7.0, +28.1) it logged four rollouts with **zero damage dealt**
+while still taking 40-64 damage per episode. A fresh eval of the same
+`iter008` checkpoint scored **75.0 dealt / 35.7 taken (+39.2 over 3)** and its
+offline action rates were still BC-like, so the zeros were dead episodes: P1's
+pad/game input had stalled while CPU3 kept attacking. The same failure appeared
+in eval after 4-5 rematches and in an attached eval as a fully paused 0/0.
+
+Fixes: a dead-episode guard stops PPO before it updates on any zero-dealt
+episode; the reset client now has a 20 s timeout; and long runs restart the
+game every four episodes. The stock reward is detected from `is_on_rebirth`
+0->1, since the live stock field is unreadable; `--stock-value 1.0` means one
+stock = 100 % damage.
+
+Retrain with the KL anchor on BC (`kl=0.1`), entropy 0.002, lr 1e-4, and two
+epochs, warm-started from `iter008`:
+
+| run | episodes | dealt | taken | differential |
+|---|---:|---:|---:|---:|
+| retrain iterations 1-3 | 29 | 62.1 | 33.0 | **+29.0** |
+| 5 rebooted chunks of 4 | 20 | 81.6 | 28.6 | **+53.0** |
+| fresh eval `retrain_iter002` | 5 | 63.8 | 31.9 | +31.9 (one dead ep.) |
+| fresh eval `chunk_01` | 5 | 54.5 | 29.9 | +24.6 |
+
+All five chunks were clean and positive. The retrain then hit the old 5 s reset
+timeout; the timeout fix and chunking address that. Best checkpoints are kept
+as `rl_dk9_cpu3_best.pt` (retrain iter002) and `rl_dk9_cpu3_iter008.pt`.
+
 ### Damage resets on a KO: what the reward does and does not count
 
 Measured over 30 episodes of `data/il/dk9` (255-stock rule):
