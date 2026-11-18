@@ -481,13 +481,16 @@ class ActionVocab:
         return len(self.keys) + 1
 
     @classmethod
-    def build(cls, episodes, size: int = 64) -> "ActionVocab":
+    def build(cls, episodes, size: int = 64,
+              ego_swap: bool = False) -> "ActionVocab":
         counts: dict[int, int] = {}
         for ep in episodes:
-            for acts in (ep.acts, mirror_action_arrays(ep.acts)):
-                for key, n in zip(*np.unique(action_keys(acts),
-                                             return_counts=True)):
-                    counts[int(key)] = counts.get(int(key), 0) + int(n)
+            variants = [ep, ego_swap_episode(ep)] if ego_swap else [ep]
+            for v in variants:
+                for acts in (v.acts, mirror_action_arrays(v.acts)):
+                    for key, n in zip(*np.unique(action_keys(acts),
+                                                 return_counts=True)):
+                        counts[int(key)] = counts.get(int(key), 0) + int(n)
         room = max(1, int(size) - 1)
         ordered = sorted(counts, key=lambda k: -counts[k])
         kept = ordered[:room]
@@ -1990,7 +1993,11 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
     if cfg.action_mode == "vocab":
         # Built from the training actions (recorded and mirrored) so the
         # vocabulary can express anything the mirror augmentation produces.
-        vocab = ActionVocab.build(train_eps, size=cfg.vocab_size)
+        # The vocabulary must cover the actions of both seats when ego-swap
+        # augmentation is on; otherwise P2-only tuples snap to the nearest P1
+        # one and the "changed" label is lost.
+        vocab = ActionVocab.build(train_eps, size=cfg.vocab_size,
+                                  ego_swap=ego_swap)
         cfg = replace(cfg, vocab_size=vocab.size)
         log(f"[bc] action vocabulary: {vocab.size - 1} observed tuples + "
             f"repeat token ({vocab.size} classes)")

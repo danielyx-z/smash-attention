@@ -1159,6 +1159,28 @@ class ActionVocabTest(unittest.TestCase):
             self.assertEqual(int(bc.action_keys(one)[0]),
                              int(vocab.keys[int(token) - 1]))
 
+    def test_ego_swap_vocabulary_covers_the_other_seat(self):
+        n = 6
+        raw = np.zeros((n, 2, len(bc.FIELDS)), np.float32)
+        buttons = np.zeros((n, 2), np.uint32)
+        buttons[:, 0] = bc.BUTTON_BITS[bc.BUTTON_INDEX["A"]]
+        buttons[:, 1] = bc.BUTTON_BITS[bc.BUTTON_INDEX["B"]]
+        acts = {"buttons": np.zeros((n, bc.N_BUTTONS), np.float32),
+                "stick": np.zeros((n, 2), np.float32),
+                "cstick": np.zeros((n, 2), np.float32),
+                "trigger": np.zeros(n, np.float32)}
+        ep = bc.EpisodeData(0, "x", {}, raw, buttons,
+                            np.zeros((n, 2, 2), np.float32),
+                            np.zeros((n, 2, 2), np.float32),
+                            np.zeros((n, 2), np.float32), player=0)
+        plain = bc.ActionVocab.build([ep], size=16)
+        swapped = bc.ActionVocab.build([ep], size=16, ego_swap=True)
+        key_a = int(bc.action_keys(ep.acts)[0])
+        key_b = int(bc.action_keys(bc.ego_swap_episode(ep).acts)[0])
+        self.assertIn(key_a, plain.keys)
+        self.assertNotIn(key_b, plain.keys)
+        self.assertIn(key_b, swapped.keys)
+
     def test_unseen_key_snaps_to_a_known_action(self):
         vocab = bc.ActionVocab.build([self._episode()], size=8)
         weird = np.int64(0)
