@@ -209,9 +209,12 @@ def _number(value: Any) -> float:
         out = float(value)
     except (TypeError, ValueError):
         return 0.0
-    if not math.isfinite(out):
+    # A finite but absurd value (some action frames carry 3.4e38) is a bad
+    # read, not a large measurement: treat it as missing.  Clipping it would
+    # still overflow float16 training windows.
+    if not math.isfinite(out) or abs(out) > OBS_LIMIT:
         return 0.0
-    return max(-OBS_LIMIT, min(OBS_LIMIT, out))
+    return out
 
 
 def _action_onehot(state: Any) -> np.ndarray:

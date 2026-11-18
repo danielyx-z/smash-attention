@@ -18,6 +18,7 @@ import os
 import struct
 import sys
 import tempfile
+import types
 import unittest
 from dataclasses import replace
 from unittest import mock
@@ -360,6 +361,21 @@ class EgoSwapTest(unittest.TestCase):
         np.testing.assert_allclose(sw.acts["cstick"], self.ep.cstick[:, 1])
         self.assertEqual(sw.player, 1)
 
+    def test_loading_the_second_seat_puts_it_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = bc.synthetic_episode(40, seed=7, index=0)
+            path = os.path.join(tmp, "episode_0000.npz")
+            write_episode(path, ep)
+            p0 = bc.load_episode(path, player=0)
+            p1 = bc.load_episode(path, player=1)
+            n = bc.OBS_PER_FIGHTER
+            np.testing.assert_allclose(p1.obs[:, :n], p0.obs[:, n:])
+            np.testing.assert_allclose(p1.obs[:, n:], p0.obs[:, :n])
+            np.testing.assert_allclose(
+                p1.acts["buttons"], p0.with_player(1).acts["buttons"])
+            # swapping the P2 view returns the P1 view (not a double swap)
+            np.testing.assert_allclose(bc.ego_swap_episode(p1).obs, p0.obs)
+
     def test_swap_is_an_involution(self):
         twice = bc.ego_swap_episode(bc.ego_swap_episode(self.ep))
         np.testing.assert_allclose(twice.obs, self.ep.obs)
@@ -376,6 +392,48 @@ class EgoSwapTest(unittest.TestCase):
         one = bc.samples_for([self.ep], cfg, mirror=False, ego_swap=True)
         two = bc.samples_for([self.ep], cfg, mirror=True, ego_swap=True)
         self.assertEqual(tmp_len(two), 2 * tmp_len(one))
+
+    def test_training_swaps_before_hold_resampling(self):
+        """The swapped seat must use hold labels built from full-rate frames."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "data")
+            os.makedirs(data)
+            sources = []
+            for i in range(3):
+                ep = bc.synthetic_episode(60, seed=i, index=i)
+                # P2 alternates A on odd frames and the stick every frame, so
+                # resampling first would throw away half its actions and lose
+                # the OR over the hold window.
+                ep.buttons_raw[:, 1] = 0
+                ep.buttons_raw[1::2, 1] = bc.BUTTON_BITS[bc.BUTTON_INDEX["A"]]
+                ep.stick[:, 1, 0] = np.where(np.arange(60) % 2 == 0, 1.0, -1.0)
+                sources.append(ep)
+                write_episode(os.path.join(data, f"episode_{i:04d}.npz"), ep)
+            calls = []
+            real = bc.samples_for
+
+            def spy(episodes, cfg, **kwargs):
+                calls.append((list(episodes), dict(kwargs)))
+                return real(episodes, cfg, **kwargs)
+
+            cfg = bc.BCConfig(hidden=16, frame_skip=2, window=4, horizon=2,
+                              label_mode="hold")
+            with mock.patch.object(bc, "samples_for", side_effect=spy):
+                bc.train(data, os.path.join(tmp, "m.pt"), cfg=cfg, epochs=1,
+                         batch=8, seed=0, mirror=False, ego_swap=True,
+                         log=lambda *a: None)
+            train_eps, kwargs = calls[0]
+            self.assertFalse(kwargs["ego_swap"])
+            swapped = [ep for ep in train_eps if ep.player == 1]
+            self.assertTrue(swapped)
+            for ep in swapped:
+                src = sources[ep.index]
+                expected = bc.resample_episode(
+                    bc.ego_swap_episode(src), 2, label_mode="hold")
+                np.testing.assert_array_equal(ep.acts["buttons"],
+                                              expected.acts["buttons"])
+                np.testing.assert_array_equal(ep.acts["stick"],
+                                              expected.acts["stick"])
 
 
 def tmp_len(samples) -> int:
@@ -557,6 +615,109 @@ class NormalizationTest(unittest.TestCase):
         self.assertAlmostEqual(float(z[:, :, 1].std()), 1.0, places=4)
         self.assertAlmostEqual(float(z[:, :, 0].mean()), 0.0, places=6)
 
+    def test_float16_windows_never_overflow(self):
+        obs, acts = make_obs_actions(8)
+        obs[3, 4] = 1.0e6                       # beyond the float16 range
+        samples = bc.window_samples(obs, acts, window=4, horizon=2,
+                                    window_dtype=np.float16)
+        self.assertEqual(samples["windows"].dtype, np.float16)
+        self.assertTrue(np.isfinite(samples["windows"]).all())
+        self.assertLessEqual(float(np.abs(samples["windows"]).max()), 65504.0)
+
+    def test_invalid_resampling_parameters_are_rejected(self):
+        for skip in (0, -2):
+            with self.assertRaises(ValueError):
+                bc.resample_indices(10, skip)
+            with self.assertRaises(ValueError):
+                bc.train("unused", "unused.pt",
+                         cfg=bc.BCConfig(frame_skip=skip), epochs=1,
+                         log=lambda *a: None)
+        with self.assertRaises(ValueError):
+            bc.train("unused", "unused.pt",
+                     cfg=bc.BCConfig(window=0), epochs=1, log=lambda *a: None)
+        with self.assertRaises(ValueError):
+            bc.load_episode("unused", player=2)
+        with self.assertRaises(ValueError):
+            bc.load_episodes("unused", player=2)
+        with self.assertRaises(ValueError):
+            bc.load_episodes("unused", limit=-1)
+        for kwargs in ({"epochs": 0}, {"batch": 0}, {"lr": -1.0}):
+            with self.assertRaises(ValueError):
+                bc.train("unused", "unused.pt", cfg=bc.BCConfig(),
+                         log=lambda *a: None, **kwargs)
+        with self.assertRaises(ValueError):
+            bc.train("unused", "unused.pt", cfg=bc.BCConfig(), epochs=1,
+                     window_dtype="int8", log=lambda *a: None)
+        with self.assertRaises(ValueError):
+            bc.train("unused", "unused.pt",
+                     cfg=bc.BCConfig(label_smoothing=1.0), epochs=1,
+                     log=lambda *a: None)
+
+    def test_corrupt_actions_are_sanitized_on_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = bc.synthetic_episode(20, seed=3, index=0)
+            ep.stick[0, 0, 0] = np.nan
+            ep.cstick[1, 1, 1] = np.inf
+            ep.trigger[2, 0] = 5.0
+            ep.raw[3, 0, bc.FIELD_INDEX["damage"]] = np.nan
+            path = os.path.join(tmp, "episode_0000.npz")
+            write_episode(path, ep)
+            loaded = bc.load_episode(path)
+            self.assertTrue(np.isfinite(loaded.stick).all())
+            self.assertTrue(np.isfinite(loaded.cstick).all())
+            self.assertTrue(np.isfinite(loaded.trigger).all())
+            self.assertLessEqual(float(loaded.trigger.max()), 1.0)
+            self.assertTrue(np.isfinite(bc.decision_rewards(loaded)).all())
+
+    def test_norm_stats_rejects_nonfinite_windows(self):
+        windows = np.zeros((4, 8, bc.OBS_DIM), np.float32)
+        windows[0, 0, 0] = np.inf
+        with self.assertRaises(ValueError):
+            bc.norm_stats(windows)
+
+    def test_policy_refuses_nonfinite_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = bc.BCConfig(hidden=8)
+            path = os.path.join(tmp, "bad.pt")
+            torch.save({
+                "format": "ssbu_bc_v1",
+                "config": cfg.to_dict(),
+                "state_dict": bc.BCPolicyNet(cfg).state_dict(),
+                "norm": {"mean": [float("inf")] + [0.0] * (bc.OBS_DIM - 1),
+                         "std": [1.0] * bc.OBS_DIM},
+                "thresholds": [0.5] * bc.N_BUTTONS,
+            }, path)
+            with self.assertRaises(ValueError):
+                bc.load_policy(path)
+            state = bc.BCPolicyNet(cfg).state_dict()
+            state["trunk.0.weight"][0, 0] = float("nan")
+            torch.save({
+                "format": "ssbu_bc_v1",
+                "config": cfg.to_dict(),
+                "state_dict": state,
+                "norm": {"mean": [0.0] * bc.OBS_DIM,
+                         "std": [1.0] * bc.OBS_DIM},
+                "thresholds": [0.5] * bc.N_BUTTONS,
+            }, path)
+            with self.assertRaises(ValueError):
+                bc.load_policy(path)
+
+    def test_training_refuses_a_nan_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "data")
+            os.makedirs(data)
+            for i in range(3):
+                write_episode(os.path.join(data, f"episode_{i:04d}.npz"),
+                              bc.synthetic_episode(40, seed=i, index=i))
+            cfg = bc.BCConfig(hidden=8, frame_skip=2, window=4, horizon=2)
+            with mock.patch.object(bc, "_eval_loss",
+                                   return_value=float("nan")):
+                with self.assertRaises(RuntimeError):
+                    bc.train(data, os.path.join(tmp, "bad.pt"), cfg=cfg,
+                             epochs=1, batch=8, mirror=False,
+                             log=lambda *a: None)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "bad.pt")))
+
     def test_dataset_normalizes_windows(self):
         obs, acts = make_obs_actions(30)
         cfg = bc.BCConfig(window=8, horizon=4)
@@ -607,6 +768,34 @@ class GymObsCompatibilityTest(unittest.TestCase):
             gym_obs.PolicyObservation().build(dicts[5])[gym_obs.PER_FIGHTER_SIZE:],
             0.0)
 
+    def test_absurd_raw_values_are_treated_as_missing(self):
+        try:
+            from rl.env import gym_obs
+        except Exception as exc:                       # pragma: no cover
+            self.skipTest(f"gym_obs not importable: {exc}")
+        raw = np.zeros((1, 2, len(bc.FIELDS)), np.float32)
+        raw[0, :, bc.FIELD_INDEX["raw_flags"]] = 1
+        raw[0, 0, bc.FIELD_INDEX["action_frame"]] = 3.4028235e38
+        raw[0, 1, bc.FIELD_INDEX["x"]] = 1.0e7
+        raw[0, 0, bc.FIELD_INDEX["vx"]] = np.inf
+        raw[0, 1, bc.FIELD_INDEX["vy"]] = np.nan
+        raw[0, 0, bc.FIELD_INDEX["dx"]] = 20000.0     # legitimate extreme
+        raw[0, 0, bc.FIELD_INDEX["action_state"]] = 3.4028235e38
+        dicts = [[{name: float(raw[0, k, j])
+                   for j, name in enumerate(bc.FIELDS)} for k in range(2)]]
+        for normalize in (False, True):
+            expected = gym_obs.PolicyObservation(
+                normalize=normalize).build(dicts[0])
+            got = bc.obs_from_raw(raw, normalize=normalize)[0]
+            np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-6,
+                                       err_msg=f"normalize={normalize}")
+        self.assertTrue(np.isfinite(got).all())
+        # the 3.4e38 sentinel became missing (0), not a huge finite value
+        pos = [name for name, _scale in bc.SCALAR_FIELDS].index("action_frame")
+        self.assertLess(abs(float(got[pos])), 1.0)
+        # an absurd status is OTHER, not WAIT (state 0)
+        self.assertEqual(int(np.argmax(got[14:46])), bc.OTHER_INDEX)
+
     def test_curated_onehot_mapping(self):
         # C's 32nd slot is OTHER for unknown/out-of-range states.
         raw = np.zeros((1, 2, len(bc.FIELDS)), np.float32)
@@ -645,6 +834,19 @@ class ActionHelperTest(unittest.TestCase):
         np.testing.assert_allclose(centers[bins[2] // 9], 1.0)
         back = bc.bin_to_xy(bins)
         self.assertLess(np.max(np.abs(back - xy)), 0.13)
+
+    def test_action_stats_decode_dir_stick_as_xy(self):
+        ep = bc.synthetic_episode(30, seed=5)
+        cfg = bc.BCConfig(window=4, horizon=2, stick_mode="dir")
+        samples = bc.samples_for([ep], cfg, mirror=False)
+        stats = bc.dataset_action_stats(samples)
+        t = samples["targets"]
+        expect = bc.dir_to_xy(t["stick"].ravel(), t["stick_mag"].ravel())
+        np.testing.assert_allclose(stats["stick_mean"], expect.mean(axis=0),
+                                   atol=1e-6)
+        neutral = bc.dir_to_xy(np.zeros(1, np.int64),
+                               np.zeros(1, np.int64))[0]
+        np.testing.assert_allclose(neutral, [0.0, 0.0])
 
     def test_calibration_matches_rate(self):
         rng = np.random.default_rng(0)
@@ -911,6 +1113,43 @@ class RealEnvAdapterTest(unittest.TestCase):
             fixture.close()
 
 
+class MakeEnvSignatureTest(unittest.TestCase):
+    def test_unsupported_kwargs_are_dropped_but_damage_mode_survives(self):
+        seen = {}
+
+        class OldEnv:
+            def __init__(self, normalize_obs=False, frame_skip=5,
+                         damage_mode="raw"):
+                seen.update(normalize_obs=normalize_obs,
+                            frame_skip=frame_skip, damage_mode=damage_mode)
+
+        module = types.ModuleType("rl.env.gym_env")
+        module.SSBUGymEnv = OldEnv
+        cfg = bc.BCConfig(frame_skip=3, damage_mode="bucket")
+        with mock.patch.dict(sys.modules, {"rl.env.gym_env": module}):
+            env, is_mock = ge.make_env(cfg, episodes=1, max_steps=10, seed=0,
+                                       mock=False, input_adapter=object(),
+                                       log=lambda *a: None)
+        self.assertFalse(is_mock)
+        self.assertIsInstance(env, OldEnv)
+        self.assertEqual(seen["damage_mode"], "bucket")
+        self.assertEqual(seen["frame_skip"], 3)
+        self.assertFalse(seen["normalize_obs"])
+
+    def test_incompatible_constructor_fails_loudly(self):
+        class BadEnv:
+            def __init__(self, only_this):
+                pass
+
+        module = types.ModuleType("rl.env.gym_env")
+        module.SSBUGymEnv = BadEnv
+        cfg = bc.BCConfig()
+        with mock.patch.dict(sys.modules, {"rl.env.gym_env": module}):
+            with self.assertRaises(SystemExit):
+                ge.make_env(cfg, episodes=1, max_steps=10, seed=0,
+                            mock=False, log=lambda *a: None)
+
+
 class EvalInfoTest(unittest.TestCase):
     def test_real_env_info_shape(self):
         info = {"stocks": [1, 0], "damages": [31.0, 120.0],
@@ -1142,6 +1381,9 @@ class ActionVocabTest(unittest.TestCase):
         vocab = bc.ActionVocab.build([self._episode()], size=64)
         self.assertGreater(vocab.size, 1)
         self.assertEqual(vocab.size, len(vocab.keys) + 1)
+        self.assertGreaterEqual(vocab.observed, vocab.size - 1)
+        self.assertEqual(bc.ActionVocab.from_dict(vocab.to_dict()).observed,
+                         vocab.observed)
         self.assertEqual(bc.REPEAT_TOKEN, 0)
         keys = bc.action_keys(self._episode().acts)
         tokens = vocab.encode(keys)
@@ -1158,6 +1400,40 @@ class ActionVocabTest(unittest.TestCase):
                    "trigger": vec[-1:][None, :]}
             self.assertEqual(int(bc.action_keys(one)[0]),
                              int(vocab.keys[int(token) - 1]))
+
+    def test_label_smoothing_changes_the_token_loss(self):
+        cfg = bc.BCConfig(hidden=8, action_mode="vocab", vocab_size=4,
+                          window=4, horizon=4, aux_weight=0.0,
+                          stick_mode="dir")
+        net = bc.BCPolicyNet(cfg)
+        obs = torch.zeros(3, cfg.window, cfg.obs_dim)
+        prev = torch.zeros(3, cfg.prev_dim)
+        targets = {"action": torch.zeros(3, cfg.horizon, dtype=torch.long)}
+        out = net(obs, prev)
+        plain, _ = bc._loss(out, targets, torch.ones(bc.N_BUTTONS), cfg)
+        smooth_cfg = replace(cfg, label_smoothing=0.1)
+        smooth, _ = bc._loss(out, targets, torch.ones(bc.N_BUTTONS), smooth_cfg)
+        self.assertTrue(np.isfinite(float(plain.detach())))
+        self.assertTrue(np.isfinite(float(smooth.detach())))
+        self.assertNotAlmostEqual(float(plain.detach()), float(smooth.detach()),
+                                  places=5)
+
+    def test_vocab_size_below_two_is_rejected(self):
+        ep = self._episode()
+        for size in (0, 1, -3):
+            with self.assertRaises(ValueError):
+                bc.ActionVocab.build([ep], size=size)
+        with self.assertRaises(ValueError):
+            bc.train("unused", "unused.pt",
+                     cfg=bc.BCConfig(action_mode="vocab", vocab_size=1),
+                     epochs=1, log=lambda *a: None)
+
+    def test_vocab_mode_rejects_cstick(self):
+        with self.assertRaises(ValueError) as ctx:
+            bc.train("unused", "unused.pt",
+                     cfg=bc.BCConfig(action_mode="vocab", cstick=True),
+                     epochs=1, log=lambda *a: None)
+        self.assertIn("C-stick", str(ctx.exception))
 
     def test_ego_swap_vocabulary_covers_the_other_seat(self):
         n = 6
@@ -1181,6 +1457,29 @@ class ActionVocabTest(unittest.TestCase):
         self.assertNotIn(key_b, plain.keys)
         self.assertIn(key_b, swapped.keys)
 
+    def test_neutral_is_not_the_same_direction_as_se(self):
+        n = 1
+        zero = {"buttons": np.zeros((n, bc.N_BUTTONS), np.float32),
+                "stick": np.zeros((n, 2), np.float32),
+                "cstick": np.zeros((n, 2), np.float32),
+                "trigger": np.zeros(n, np.float32)}
+        se = {k: v.copy() for k, v in zero.items()}
+        se["stick"][0] = [1.0, -1.0]
+        neutral_key = bc.action_keys(zero)[0]
+        se_key = bc.action_keys(se)[0]
+        # same buttons; direction 0 vs 8 must cost more than the magnitude gap
+        dist = bc._key_distance(np.array([neutral_key]),
+                                np.array([se_key]))[0]
+        self.assertGreaterEqual(float(dist), 8.0)
+        # the compass ring itself still wraps correctly
+        e = {k: v.copy() for k, v in zero.items()}
+        e["stick"][0] = [1.0, 0.0]
+        w = {k: v.copy() for k, v in zero.items()}
+        w["stick"][0] = [-1.0, 0.0]
+        ring = bc._key_distance(np.array([bc.action_keys(e)[0]]),
+                                np.array([bc.action_keys(w)[0]]))[0]
+        self.assertEqual(float(ring), 2.0 * 4.0)
+
     def test_unseen_key_snaps_to_a_known_action(self):
         vocab = bc.ActionVocab.build([self._episode()], size=8)
         weird = np.int64(0)
@@ -1203,6 +1502,23 @@ class ActionVocabTest(unittest.TestCase):
                 "trigger": np.zeros(1, np.float32)}
         expected = int(bc.action_keys(bc.mirror_action_arrays(acts))[0])
         self.assertEqual(int(bc.mirror_key(bc.action_keys(acts)[0])), expected)
+
+    def test_no_mirror_vocab_does_not_waste_slots_on_mirrors(self):
+        n = 6
+        acts = {"buttons": np.zeros((n, bc.N_BUTTONS), np.float32),
+                "stick": np.zeros((n, 2), np.float32),
+                "cstick": np.zeros((n, 2), np.float32),
+                "trigger": np.zeros(n, np.float32)}
+        acts["stick"][:, 0] = 1.0                  # E only
+        ep = episode_from_obs_actions(
+            np.zeros((n, bc.OBS_DIM), np.float32), acts)
+        key = int(bc.action_keys(ep.acts)[0])
+        mirrored = int(bc.mirror_key(key))
+        self.assertNotEqual(key, mirrored)
+        plain = bc.ActionVocab.build([ep], size=16, mirror=False)
+        with_mirror = bc.ActionVocab.build([ep], size=16, mirror=True)
+        self.assertNotIn(mirrored, plain.keys)
+        self.assertIn(mirrored, with_mirror.keys)
 
     def test_vocab_includes_mirrored_actions(self):
         vocab = bc.ActionVocab.build([self._episode()], size=64)
@@ -1266,7 +1582,7 @@ class ActionVocabTest(unittest.TestCase):
             out = os.path.join(tmp, "vocab.pt")
             cfg = bc.BCConfig(hidden=32, frame_skip=5, action_mode="vocab",
                               vocab_size=32, damage_mode="bucket",
-                              label_mode="hold")
+                              label_mode="hold", aux_weight=0.5)
             ckpt, metrics = bc.train(data, out, cfg=cfg, epochs=1, batch=8,
                                      seed=0, mirror=False,
                                      log=lambda *a: None)
@@ -1276,9 +1592,12 @@ class ActionVocabTest(unittest.TestCase):
             self.assertEqual(ckpt["label_mode"], "hold")
             self.assertIsNotNone(ckpt["vocab"])
             self.assertEqual(ckpt["config"]["vocab_size"], metrics["vocab_size"])
+            self.assertEqual(ckpt["config"]["aux_weight"], 0.5)
+            self.assertIn("button_head.weight", ckpt["state_dict"])
             self.assertTrue(np.all(np.asarray(ckpt["thresholds"]) == 0.5))
             policy = bc.load_policy(out)
             self.assertIsNotNone(policy.vocab)
+            self.assertIsNotNone(policy.net.button_head)
             action = policy.act(np.zeros(bc.OBS_DIM, np.float32))
             self.assertEqual(action["buttons"].shape, (bc.N_BUTTONS,))
             self.assertEqual(action["stick"].shape, (2,))
@@ -1364,6 +1683,18 @@ class DedupeTest(unittest.TestCase):
             # the limit applies after dedupe
             one = bc.load_episodes(tmp, limit=1, log=lambda *a: None)
             self.assertEqual(len(one), 1)
+
+    def test_malformed_archive_does_not_abort_dedupe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = bc.synthetic_episode(30, seed=2, index=0)
+            write_episode(os.path.join(tmp, "episode_0000.npz"), good)
+            with open(os.path.join(tmp, "episode_0001.npz"), "wb") as fh:
+                fh.write(b"not an npz archive")
+            logs = []
+            episodes = bc.load_episodes(tmp, log=logs.append)
+            self.assertEqual(len(episodes), 1)
+            self.assertTrue(any("cannot hash" in line for line in logs))
+            self.assertTrue(any("skipping" in line for line in logs))
 
 
 class RecorderTest(unittest.TestCase):

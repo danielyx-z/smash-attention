@@ -35,6 +35,7 @@ Environment interface assumed (documented in FINDINGS, Agent E):
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -194,19 +195,29 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
                   "frame_skip": cfg.frame_skip, "max_steps": max_steps}
         if input_adapter is not None:
             kwargs["input_adapter"] = input_adapter
+        # Drop only the keywords this constructor does not accept.  Retrying
+        # with a hand-written shorter call used to discard damage_mode (and
+        # sometimes frame_skip) on older signatures, silently evaluating with
+        # the wrong observation scaling.
+        try:
+            params = inspect.signature(SSBUGymEnv.__init__).parameters
+            accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                                 for p in params.values())
+            if not accepts_kwargs:
+                dropped = sorted(k for k in kwargs if k not in params)
+                for key in dropped:
+                    kwargs.pop(key)
+                if dropped:
+                    log(f"[eval] env constructor has no {dropped}; "
+                        "omitting those options")
+        except (TypeError, ValueError):
+            pass
         try:
             env = SSBUGymEnv(**kwargs)
-        except TypeError:
-            try:
-                env = SSBUGymEnv(normalize_obs=cfg.obs_normalize,
-                                 frame_skip=cfg.frame_skip)
-            except TypeError:
-                try:
-                    env = SSBUGymEnv(normalize_obs=cfg.obs_normalize)
-                except TypeError as exc:
-                    log(f"[eval] SSBUGymEnv() needs arguments ({exc}); "
-                        "the adapter assumes a no-argument constructor")
-                    raise SystemExit(2)
+        except TypeError as exc:
+            log(f"[eval] SSBUGymEnv() rejected {sorted(kwargs)} ({exc}); "
+                "the adapter assumes a compatible constructor")
+            raise SystemExit(2)
         log(f"[eval] env config: frame_skip={cfg.frame_skip} "
             f"normalize_obs={cfg.obs_normalize} "
             f"damage_mode={getattr(cfg, 'damage_mode', 'raw')} "
@@ -662,6 +673,9 @@ def main(argv: list[str] | None = None) -> int:
             "C-stick head; using the checkpoint config")
     ensemble = bc.TemporalEnsemble(policy, execute=args.execute,
                                    blend=0.0 if args.no_blend else 0.5)
+    if cfg.action_mode == "vocab" and not args.no_blend:
+        log("[eval] note: vocab checkpoints choose whole tokens, so "
+            "temporal blending is disabled (use --no-blend to silence)")
     pad = None
     if args.start_menus and not args.mock:
         from rl.input.gym_input import VirtualPad

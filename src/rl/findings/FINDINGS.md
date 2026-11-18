@@ -1696,6 +1696,73 @@ scored -53.2 on a fresh boot), so the CPU/session variance is larger than the
 difference between the two policies. For an RL initialisation the token model
 is the more active starting point, but 3 episodes cannot rank them.
 
+### Regularized vocab model: best BC closed-loop result so far
+
+The first all-200-episode run exposed two problems: it overfit after epoch 6
+(train loss fell while validation loss rose), and a single corrupt raw frame
+(`action_frame = 3.4e38`) overflowed the float16 window storage. The overflow
+made the normalization statistics `inf`/`NaN`, so the run trained to `NaN` and
+saved a repeat-only model. This is now fixed at four layers: absurd/non-finite
+observations become missing values, the float16 cast is bounded, `norm_stats`
+refuses non-finite input, and training aborts instead of saving a non-finite
+model. Two related bugs were also fixed: ego-swap augmentation was applied
+after resampling (losing the hold-label OR on half the augmented data), and
+`--player 1` labelled P2 actions while leaving P1 first in the observation.
+
+The regularized retrain used all 200 unique episodes, `--ego-swap`, hold
+labels, 10 % damage buckets, aux dense losses (0.5), label smoothing 0.05,
+hidden 192, dropout 0.15 on the GRU summary and MLP, AdamW weight decay 1e-2,
+lr 8e-4, and `--select-metric f1_change` with patience 4. The vocabulary kept
+all **136 observed tuples + repeat = 137 classes** (the old 64-class cap was
+silently snapping rare actions). Training early-stopped at epoch 13, selecting
+epoch 9; unlike the earlier run, train and validation loss both fell
+(2.16 -> 1.75 and 1.84 -> 1.70) and the predicted repeat rate matched the
+expert instead of overshooting it.
+
+Offline (test): token accuracy 0.844, f1_active 0.761, f1_change 0.684, stick
+direction 0.902, stick MAE 0.065, repeat predicted 0.774 vs expert 0.788.
+Previous vocab test: 0.794 / 0.719 / 0.629 / 0.870 / 0.085 / 0.767 vs 0.779.
+
+Closed loop, fresh boot, `--sample --execute 1 --no-blend`, 8 x 900 decisions,
+DK vs DK CPU 9:
+
+| model | damage dealt | damage taken | differential | A | X | ZL | stick neutral |
+|---|---|---|---|---|---|---|---|
+| CWBC (same session) | 8.8 | 62.0 | -53.2 | 2.0 | 20.1 | - | 0.502 |
+| old vocab (100 eps) | 35.5 | 91.2 | -55.7 | 3.7 | 8.4 | - | 0.453 |
+| **regularized vocab (200 eps, ego-swap)** | **39.3** | **57.9** | **-18.5** | 6.2 | 12.6 | 5.7 | 0.458 |
+
+Per-episode differentials: -69.3, +21.8, -37.2, -65.8, -31.0, +58.2, +0.3,
+-25.1. The policy deals 49 % of the teacher's 79.6 %/30 s, takes 80 % of the
+teacher's 72.5 %/30 s output, and is the first BC checkpoint to finish clearly
+ahead of the historical CWBC -29.1. Two of eight episodes were positive, so
+the ranking is still noisy; 900 decisions per episode ends at the step limit,
+so `winner` is `None` and the damage differential is the metric.
+
+### PPO pilot: 20k decisions is too little; clip-only drifted
+
+`rl/rl/ppo.py` adds a scalar value head to the BC trunk and runs token-level
+PPO against the live 30 Hz env, with `0.01 * (dealt - taken)` and every
+stock/KO/win reward term set to zero. The first pilot used 10 iterations x
+2048 decisions = **20,480 decisions** (about 20 episodes, 11 minutes), two
+episodes per rollout, clip 0.2, no KL term. It completed without errors but
+produced a worse policy:
+
+| policy | dealt | taken | differential |
+|---|---|---|---|
+| BC (regularized) | 39.3 | 57.9 | -18.5 |
+| PPO pilot, 20k decisions | 33.3 | 96.1 | -62.8 |
+
+One of the pilot's ten logged rollouts reported 0/0 damage. The episode row
+used only the final `info` frame, which is 0/0 during a respawn/damage reset;
+the per-step reward was not affected. The logger now keeps the episode's peak
+P1/P2 damage, so a future 0/0 means the episode really was dead/paused rather
+than a post-KO reset. Checkpoints are now written per iteration
+(`rl_dk9_ppo_iterNNN.pt`) as well as to the latest path, so the next run can
+select the best iteration instead of keeping the last one. A serious run needs
+more episodes per rollout (8-16), 200k+ decisions, and a BC-anchored KL term
+(or BC auxiliary loss) to prevent this kind of drift.
+
 ### Damage resets on a KO: what the reward does and does not count
 
 Measured over 30 episodes of `data/il/dk9` (255-stock rule):

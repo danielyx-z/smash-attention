@@ -788,6 +788,8 @@ class SSBUGymEnv(gym.Env):
 
         The same frame is only observed once (dedup by ``seq`` + timestamp).
         """
+        if not self.require_positive_stock and not self.stock_termination:
+            return
         stamp = (int(snap.seq), int(snap.ts_ns))
         if stamp == self._last_stock_stamp:
             return
