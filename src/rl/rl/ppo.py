@@ -704,6 +704,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--game-log", default="~/smash.log")
     ap.add_argument("--pad-timeout", type=float, default=15.0)
     ap.add_argument("--menu-timeout", type=float, default=120.0)
+    ap.add_argument("--reset-timeout", type=float, default=20.0,
+                    help="seconds to wait for the in-fight rematch ack")
     ap.add_argument("--mock", action="store_true",
                     help="no game; tiny mock env for a plumbing run")
     ap.add_argument("--dropout", type=float, default=0.0,
@@ -760,6 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                                   weight_decay=float(ppo.weight_decay))
     pad = None
     env = None
+    reset_client = None
     try:
         if args.mock:
             env = MockCombatEnv(max_steps=ppo.max_steps, seed=ppo.seed)
@@ -780,12 +783,20 @@ def main(argv: list[str] | None = None) -> int:
                 ko_bonus=stock_value, stock_loss=-stock_value,
                 win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
                 ego_slot=0)
+            reset_fn = None
+            try:
+                from rl.input.gym_reset import ResetClient
+                reset_client = ResetClient(timeout=float(args.reset_timeout))
+                reset_fn = reset_client.reset
+            except Exception as exc:    # noqa: BLE001
+                log(f"[ppo] no long-timeout reset client ({exc}); "
+                    "using the environment default")
             env = SSBUGymEnv(
                 normalize_obs=cfg.obs_normalize, damage_mode=cfg.damage_mode,
                 frame_skip=cfg.frame_skip, max_steps=ppo.max_steps,
                 reward_mode="combat", reward_config=reward_cfg,
                 stock_termination=False, require_positive_stock=False,
-                input_adapter=pad)
+                input_adapter=pad, reset_fn=reset_fn)
             if pad is not None:
                 ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
                 game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
@@ -869,6 +880,11 @@ def main(argv: list[str] | None = None) -> int:
             close = getattr(env, "close", None)
             if callable(close):
                 close()
+        if reset_client is not None:
+            try:
+                reset_client.close()
+            except Exception:                     # noqa: BLE001
+                pass
         if pad is not None:
             pad.destroy()
 
