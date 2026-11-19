@@ -1973,3 +1973,17 @@ First live drill episodes: setup ~24-138 decisions, offstage P1 at
 `x≈-98, y≈-10`, several successful recoveries (+1.0 reward, 0 deaths) and
 several deaths (-13 reward).  The viewer now starts beside the game window
 (`[view] window 1440x860+1390+310`) instead of on top of it.
+
+### Recovery drill result (10 iterations, CPU3, 50% mirrored)
+
+341 drill episodes:
+
+* 204 recovered (60%), 137 died;
+* first half 51% recovered, second half **69%**;
+* P1 deaths per iteration fell from 20/28 to 10-11/37;
+* recovery reward ~+1.03, death reward ~-12.9 (death -5 plus fall/doom shaping);
+* `kl_bc` rose to 0.5-1.2, so the policy is now far from the BC prior.
+
+The drill is clearly teaching recovery, but it is drill-only: normal on-stage
+play may have drifted.  The final checkpoint is being evaluated against CPU7 to
+decide whether the next phase should mix drill and normal episodes.
