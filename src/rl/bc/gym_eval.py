@@ -205,6 +205,8 @@ def reward_config_from_checkpoint(policy) -> object | None:
         offstage_penalty=float(meta.get("offstage_penalty", 0.0) or 0.0),
         opponent_offstage_reward=float(
             meta.get("opponent_offstage_reward", 0.0) or 0.0),
+        opponent_offstage_potential=float(
+            meta.get("opponent_offstage_potential", 0.0) or 0.0),
         recovery_weight=float(meta.get("recovery_weight", 0.0) or 0.0))
 
 
@@ -814,6 +816,8 @@ def main(argv: list[str] | None = None) -> int:
     if reward_cfg is not None and not args.mock:
         log(f"[eval] combat reward from checkpoint: stock_value={stock_value:g} "
             f"offstage_penalty={reward_cfg.offstage_penalty:g} "
+            f"opponent_offstage={reward_cfg.opponent_offstage_reward:g} "
+            f"opponent_potential={reward_cfg.opponent_offstage_potential:g} "
             f"recovery_weight={reward_cfg.recovery_weight:g}; "
             "deaths are counted from is_on_rebirth")
     pad = None

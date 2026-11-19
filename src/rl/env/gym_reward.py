@@ -55,8 +55,15 @@ class RewardConfig:
     offstage_penalty: float = 0.0
     #: Positive per-decision reward while the opponent is below the stage,
     #: mirroring ``offstage_penalty``.  This pays for edgeguarding: keeping the
-    #: opponent offstage is progress, whether or not the KO lands.
+    #: opponent offstage is progress, whether or not the KO lands.  It pays for
+    #: the opponent's state even when the ego did nothing, so prefer the
+    #: potential-based term below for a causal edgeguard signal.
     opponent_offstage_reward: float = 0.0
+    #: Potential-based edgeguard reward: ``w * (danger_opp(curr) -
+    #: danger_opp(prev))``.  Pays when the ego pushes the opponent below the
+    #: stage and charges when the opponent recovers; standing there while the
+    #: CPU plays offstage earns nothing.
+    opponent_offstage_potential: float = 0.0
     #: Potential-based reward for reducing distance below the stage: moving
     #: upward/toward recovery gets a bonus, falling gets a matching penalty.
     recovery_weight: float = 0.0
@@ -76,6 +83,7 @@ class RewardConfig:
             "ego_slot": self.ego_slot,
             "offstage_penalty": self.offstage_penalty,
             "opponent_offstage_reward": self.opponent_offstage_reward,
+            "opponent_offstage_potential": self.opponent_offstage_potential,
             "recovery_weight": self.recovery_weight,
             "stage_half_width": self.stage_half_width,
             "stage_top": self.stage_top,
@@ -203,6 +211,9 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     opp_danger = _edge_danger(cf_opp, cfg)
     if cfg.opponent_offstage_reward and opp_danger > 0.0:
         reward += float(cfg.opponent_offstage_reward) * opp_danger
+    if cfg.opponent_offstage_potential:
+        reward += float(cfg.opponent_offstage_potential) * (
+            opp_danger - _edge_danger(pf_opp, cfg))
     if cfg.recovery_weight and not _rebirth(cf_ego):
         reward += float(cfg.recovery_weight) * (
             _recovery_distance(pf_ego, cfg) - _recovery_distance(cf_ego, cfg))

@@ -715,6 +715,8 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "offstage_penalty": float(getattr(args, "offstage_penalty", 0.0)),
             "opponent_offstage_reward": float(
                 getattr(args, "opponent_offstage_reward", 0.0)),
+            "opponent_offstage_potential": float(
+                getattr(args, "opponent_offstage_potential", 0.0)),
             "recovery_weight": float(getattr(args, "recovery_weight", 0.0)),
             "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
             "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
@@ -770,6 +772,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--opponent-offstage-reward", type=float, default=0.0,
                     help="positive per-decision reward while the opponent is "
                          "below the stage (mirror of --offstage-penalty)")
+    ap.add_argument("--opponent-offstage-potential", type=float, default=0.0,
+                    help="potential-based edgeguard reward per unit of "
+                         "increase in the opponent's below-stage danger")
     ap.add_argument("--recovery-weight", type=float, default=0.0,
                     help="potential-based reward per world-unit of recovery "
                          "toward the stage (e.g. 0.02)")
@@ -816,6 +821,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--offstage-penalty must be >= 0")
     if float(args.opponent_offstage_reward) < 0.0:
         ap.error("--opponent-offstage-reward must be >= 0")
+    if float(args.opponent_offstage_potential) < 0.0:
+        ap.error("--opponent-offstage-potential must be >= 0")
     if float(args.recovery_weight) < 0.0:
         ap.error("--recovery-weight must be >= 0")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
@@ -882,6 +889,8 @@ def main(argv: list[str] | None = None) -> int:
                 ego_slot=0, offstage_penalty=float(args.offstage_penalty),
                 opponent_offstage_reward=float(
                     args.opponent_offstage_reward),
+                opponent_offstage_potential=float(
+                    args.opponent_offstage_potential),
                 recovery_weight=float(args.recovery_weight))
             reset_fn = None
             try:

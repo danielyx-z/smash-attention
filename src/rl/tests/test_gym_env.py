@@ -590,6 +590,36 @@ class TestReward(unittest.TestCase):
             opponent_offstage_reward=0.05)
         self.assertAlmostEqual(gym_reward.compute_reward(prev, both, cfg2), 0.0)
 
+    def test_opponent_offstage_potential(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0,
+            opponent_offstage_potential=0.1)
+        on = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                   fighter(x=0.0, y=0.0, on_ground=1)])
+        deep = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                     fighter(x=130.0, y=-60.0, on_ground=0)])
+        shallow = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                        fighter(x=130.0, y=-20.0, on_ground=0)])
+        # Pushing P2 below the stage pays once.
+        self.assertAlmostEqual(gym_reward.compute_reward(on, deep, cfg), 0.1)
+        self.assertAlmostEqual(gym_reward.compute_reward(on, shallow, cfg),
+                               0.025)
+        # Staying below pays nothing further.
+        self.assertAlmostEqual(gym_reward.compute_reward(deep, deep, cfg), 0.0)
+        # Letting P2 recover is charged.
+        self.assertAlmostEqual(gym_reward.compute_reward(deep, on, cfg), -0.1)
+        # Horizontal side play is not part of the potential.
+        side = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                     fighter(x=130.0, y=50.0, on_ground=0)])
+        self.assertAlmostEqual(gym_reward.compute_reward(on, side, cfg), 0.0)
+        # Rebirth clears the danger potential.
+        rebirth = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                        fighter(x=130.0, y=-60.0, on_ground=0,
+                                is_on_rebirth=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(deep, rebirth, cfg), -0.1)
+
     def test_recovery_rewards_climbing_back(self):
         cfg = gym_reward.RewardConfig(
             damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
