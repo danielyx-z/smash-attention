@@ -123,20 +123,27 @@ def _rebirth(fighter: dict) -> bool:
         return False
 
 
-def _offstage(fighter: dict, cfg: "RewardConfig") -> bool:
-    """True when the fighter is airborne beyond the assumed stage bounds."""
+def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
+    """0..1 danger factor for being high/offstage near an edge.
+
+    The old binary check only fired after P1 was already past the stage edge.
+    This ramps up from 20 world units inside the edge and below the stage top,
+    so approaching the edge while airborne is penalized before the fall.
+    """
     if _rebirth(fighter):
-        return False
+        return 0.0
     try:
         airborne = int(fighter.get("on_ground", 0)) == 0
     except (TypeError, ValueError):
         airborne = False
     if not airborne:
-        return False
+        return 0.0
     x = _number(fighter, "x")
     y = _number(fighter, "y")
-    return abs(x) > float(cfg.stage_half_width) or \
-        y < float(cfg.stage_top) - 10.0
+    margin = 20.0
+    dx = max(0.0, abs(x) - (float(cfg.stage_half_width) - margin))
+    dy = max(0.0, (float(cfg.stage_top) - 10.0) - y)
+    return min(1.0, (dx + dy) / 40.0)
 
 
 def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
@@ -169,8 +176,9 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     taken = max(0.0, _number(cf_ego, "damage") - _number(pf_ego, "damage"))
     reward = cfg.damage_scale * (cfg.damage_dealt * dealt
                                  - cfg.damage_taken * taken)
-    if cfg.offstage_penalty and _offstage(cf_ego, cfg):
-        reward -= float(cfg.offstage_penalty)
+    danger = _edge_danger(cf_ego, cfg)
+    if cfg.offstage_penalty and danger > 0.0:
+        reward -= float(cfg.offstage_penalty) * danger
 
     # stock / KO deltas
     prev_stock_ego, stock_ego = _stock(pf_ego), _stock(cf_ego)

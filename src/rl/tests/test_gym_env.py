@@ -539,6 +539,12 @@ class TestReward(unittest.TestCase):
         on = snap([fighter(x=0.0, y=0.0, on_ground=1),
                    fighter(x=0.0, y=0.0, on_ground=1)])
         self.assertAlmostEqual(gym_reward.compute_reward(prev, on, cfg), 0.0)
+        # The penalty ramps in before the edge: x=90 is 10 units into the
+        # 20-unit warning margin, so danger=0.25.
+        near = snap([fighter(x=90.0, y=50.0, on_ground=0),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, near, cfg), -0.0125)
         # A fighter on the revival platform is not penalized.
         rebirth = snap([fighter(x=130.0, y=-20.0, on_ground=0,
                                 is_on_rebirth=1),
@@ -559,6 +565,15 @@ class TestReward(unittest.TestCase):
                          fighter(stock=0, damage=0.0, is_on_rebirth=0)])
         self.assertAlmostEqual(
             gym_reward.compute_reward(prev, ego_died, cfg), -1.0)
+        # The stock value is exactly the configured term, even when the live
+        # stock field reads 0: a CPU5 run can use stock_loss=-2.0.
+        expensive = gym_reward.RewardConfig(
+            ko_bonus=2.0, stock_loss=-2.0, win_bonus=0.0,
+            loss_penalty=0.0)
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, ego_died, expensive), -2.0)
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, opp_died, expensive), 2.0)
 
     def test_ego_slot_swap(self):
         prev = snap([fighter(damage=0.0), fighter(damage=0.0)])
