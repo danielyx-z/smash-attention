@@ -388,7 +388,8 @@ def _episode_row(info: dict, length: int, ret: float,
                  terminated: bool, truncated: bool,
                  peak: dict | None = None,
                  deaths: dict | None = None,
-                 totals: dict | None = None) -> dict:
+                 totals: dict | None = None,
+                 death_rewards: list | None = None) -> dict:
     """Summarize one episode.
 
     The last info frame can be a respawn with damage reset to 0, so the final
@@ -414,6 +415,7 @@ def _episode_row(info: dict, length: int, ret: float,
             "p1_damage": p1, "p2_damage": p2, "winner": winner,
             "p1_deaths": int(deaths.get("p1", 0)),
             "p2_deaths": int(deaths.get("p2", 0)),
+            "death_rewards": [float(x) for x in (death_rewards or [])],
             "terminated": bool(terminated), "truncated": bool(truncated)}
 
 
@@ -439,6 +441,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     prev_rebirth = _rebirth_flags(info)
     prev_damages = _damages(info)
     deaths = {"p1": 0, "p2": 0}
+    death_rewards: list[float] = []
     while len(rewards) < steps:
         window = state.window().copy()
         prev = state.prev.copy()
@@ -470,6 +473,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         for i, key in enumerate(("p1", "p2")):
             if curr_rebirth[i] and not prev_rebirth[i]:
                 deaths[key] += 1
+                death_rewards.append(float(reward))
         prev_rebirth = curr_rebirth
         curr_damages = _damages(info)
         ep_taken += max(0.0, curr_damages[0] - prev_damages[0])
@@ -490,7 +494,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         if terminated or truncated:
             row = _episode_row(
                 info, ep_len, ep_ret, terminated, truncated, peak, deaths,
-                totals={"dealt": ep_dealt, "taken": ep_taken})
+                totals={"dealt": ep_dealt, "taken": ep_taken},
+                death_rewards=death_rewards)
             episodes.append(row)
             if on_episode is not None:
                 on_episode(row)
@@ -506,6 +511,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             prev_rebirth = _rebirth_flags(info)
             prev_damages = _damages(info)
             deaths = {"p1": 0, "p2": 0}
+            death_rewards = []
     batch = {
         "windows": np.stack(windows).astype(np.float32),
         "prevs": np.stack(prevs).astype(np.float32),
@@ -840,12 +846,25 @@ def main(argv: list[str] | None = None) -> int:
                     log("[ppo] giving up: no fight")
                     return 2
         state = PolicyState(cfg)
+
+        def episode_log(row: dict) -> None:
+            stats_writer.record_episode(row)
+            p1 = row.get("p1_damage")
+            p2 = row.get("p2_damage")
+            diff = ((float(p2) - float(p1))
+                    if p1 is not None and p2 is not None else float("nan"))
+            log(f"[ppo] episode: dmg_diff {diff:+.1f} "
+                f"rew {float(row.get('return', 0.0)):+.3f} "
+                f"deaths P1 {row.get('p1_deaths', 0)}/"
+                f"P2 {row.get('p2_deaths', 0)} "
+                f"death_rew {row.get('death_rewards', [])}")
+
         for iteration in range(1, int(ppo.iterations) + 1):
             t0 = time.monotonic()
             batch, episodes = collect_rollout(
                 env, model, state, cfg, vocab, mean, std, device,
                 int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
-                on_episode=stats_writer.record_episode,
+                on_episode=episode_log,
                 on_step=stats_writer.record_step)
             dead = [e for e in episodes
                     if float(e.get("p2_damage", 0.0) or 0.0) <= 0.0]
