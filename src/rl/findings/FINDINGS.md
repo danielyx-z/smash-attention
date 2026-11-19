@@ -2049,3 +2049,16 @@ whether the drill phase itself improved before the last normal chunk.
 
 `rl_cpu7_drill_best.pt` remains the best known checkpoint
 (2 deaths / 10, +31.7, -18.3).
+
+### 80/20 drill result
+
+The second drill checkpoint (`rl_cpu7d2_c02a_drill.pt`) evaluated on CPU7:
+
+* 4 P1 deaths / 10;
+* damage diff +5.8;
+* stock-adjusted -194.2.
+
+The final normal chunk was worse still (7/10 deaths, -273.8).  More normal
+CPU7 training under this objective consistently erodes the recovery skill;
+`rl_cpu7_drill_best.pt` remains the best (2/10, +31.7, -18.3).  Stop here
+unless a lower-LR / stronger-anchor normal fine-tune is tried.
