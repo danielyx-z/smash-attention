@@ -583,12 +583,90 @@ def blast_box(header: dict) -> tuple[float, float, float, float]:
 # ---------------------------------------------------------------------------
 # Tk application
 # ---------------------------------------------------------------------------
+def _game_window_geometry(timeout: float = 5.0):
+    """(x, y, w, h) of the game window, or None.
+
+    Uses xdotool because Tk has no portable way to query another top-level
+    window.  live.sh already depends on xdotool.
+    """
+    import shutil
+    import subprocess
+    import time
+    if shutil.which("xdotool") is None:
+        return None
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        win = None
+        for args in (["search", "--class", "ssbu_native"],
+                     ["search", "--name", "SSBU native"]):
+            try:
+                found = subprocess.run(
+                    ["xdotool"] + args, capture_output=True, text=True,
+                    timeout=1.0).stdout.split()
+            except Exception:                 # noqa: BLE001
+                found = []
+            if found:
+                win = found[-1]
+                break
+        if win:
+            try:
+                out = subprocess.run(
+                    ["xdotool", "getwindowgeometry", "--shell", win],
+                    capture_output=True, text=True, timeout=1.0).stdout
+            except Exception:                 # noqa: BLE001
+                out = ""
+            values = {}
+            for line in out.splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key.strip()] = value.strip()
+            try:
+                return (int(values["X"]), int(values["Y"]),
+                        int(values["WIDTH"]), int(values["HEIGHT"]))
+            except (KeyError, ValueError):
+                pass
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.25)
+
+
+def adjacent_geometry(root, width: int, height: int, gap: int = 8,
+                      min_width: int = 560):
+    """Place the HUD beside the game instead of on top of it."""
+    game = _game_window_geometry()
+    sw = int(root.winfo_screenwidth())
+    sh = int(root.winfo_screenheight())
+    if game is None:
+        return width, height, None, None
+    gx, gy, gw, gh = game
+    # Right of the game.
+    free = sw - (gx + gw + gap)
+    if free >= min_width:
+        return (min(width, free), min(height, sh - max(0, gy)),
+                gx + gw + gap, max(0, gy))
+    # Left of the game.
+    free = gx - gap
+    if free >= min_width:
+        w = min(width, free)
+        return w, min(height, sh - max(0, gy)), gx - gap - w, max(0, gy)
+    # Below the game.
+    free = sh - (gy + gh + gap)
+    if free >= 240:
+        return (min(width, sw), min(height, free),
+                max(0, gx), gy + gh + gap)
+    # Fullscreen/no room: keep it visible at the right edge and do not steal
+    # the topmost slot, so the game is not permanently covered.
+    w = min(width, max(min_width, sw // 3))
+    return w, min(height, sh), max(0, sw - w), 0
+
+
 class LiveView:
     def __init__(self, root, source, *, topmost: bool = True,
                  width: int = 1440, height: int = 860, fps: float = 60.0,
                  panel_hz: float = 12.0, trails: int = 48,
                  max_objects: int = 32,
-                 stats_file: str = DEFAULT_STATS_FILE):
+                 stats_file: str = DEFAULT_STATS_FILE,
+                 place_adjacent: bool = True, gap: int = 8):
         import tkinter as tk
         self.tk = tk
         self.root = root
@@ -615,8 +693,16 @@ class LiveView:
         self.stats_data: dict | None = None
         self.stats_next = 0.0
 
+        x = y = None
+        if place_adjacent:
+            width, height, x, y = adjacent_geometry(root, width, height, gap)
         root.title("SSBU live view")
-        root.geometry(f"{int(width)}x{int(height)}")
+        geometry = f"{int(width)}x{int(height)}"
+        if x is not None and y is not None:
+            geometry += f"+{int(x)}+{int(y)}"
+        root.geometry(geometry)
+        if place_adjacent:
+            print(f"[view] window {geometry}", flush=True)
         root.configure(bg=BG)
         if topmost:
             try:
@@ -1273,6 +1359,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-topmost", action="store_true")
     ap.add_argument("--width", type=int, default=1440)
     ap.add_argument("--height", type=int, default=860)
+    ap.add_argument("--no-place-adjacent", action="store_true",
+                    help="let the window manager place the HUD")
+    ap.add_argument("--gap", type=int, default=8,
+                    help="pixels between the game and the HUD")
     ap.add_argument("--fps", type=float, default=60.0)
     ap.add_argument("--panel-hz", type=float, default=12.0)
     ap.add_argument("--trails", type=int, default=48)
@@ -1309,7 +1399,9 @@ def main(argv: list[str] | None = None) -> int:
                     width=args.width, height=args.height, fps=args.fps,
                     panel_hz=args.panel_hz, trails=args.trails,
                     max_objects=args.max_objects,
-                    stats_file=args.stats_file)
+                    stats_file=args.stats_file,
+                    place_adjacent=not args.no_place_adjacent,
+                    gap=args.gap)
     try:
         root.mainloop()
     finally:

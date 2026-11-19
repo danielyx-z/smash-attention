@@ -171,6 +171,81 @@ class GAETest(unittest.TestCase):
         np.testing.assert_allclose(adv, [1.5, 1.5, 10.0], rtol=1e-6)
 
 
+class _FakeMirrorEnv:
+    max_steps = 10
+    ego_slot = 0
+
+    def __init__(self):
+        self.obs = np.arange(bc.OBS_DIM, dtype=np.float32)
+        self.action = None
+        self.setup_observations = []
+        self.setup_action = None
+        self.action_space = None
+        self.observation_space = None
+
+    def reset(self, seed=None):
+        return self.obs.copy(), {"ok": True}
+
+    def step(self, action):
+        self.action = action
+        return self.obs.copy(), 0.0, False, True, {"ok": True}
+
+
+class MirrorWrapperTest(unittest.TestCase):
+    def _action(self):
+        buttons = np.zeros(bc.N_BUTTONS, np.float32)
+        buttons[bc.BUTTON_INDEX["DPAD_L"]] = 1.0
+        return {"buttons": buttons,
+                "stick": np.array([1.0, 0.5], np.float32),
+                "cstick": np.array([-0.5, 0.25], np.float32),
+                "trigger": 0.0}
+
+    def test_action_mirror(self):
+        from rl.rl import mirror
+        out = mirror.mirror_action(self._action())
+        self.assertEqual(out["stick"][0], -1.0)
+        self.assertEqual(out["stick"][1], 0.5)
+        self.assertEqual(out["cstick"][0], 0.5)
+        self.assertEqual(out["buttons"][bc.BUTTON_INDEX["DPAD_R"]], 1.0)
+        self.assertEqual(out["buttons"][bc.BUTTON_INDEX["DPAD_L"]], 0.0)
+        arr = np.zeros(bc.N_BUTTONS + 5, np.float32)
+        arr[bc.BUTTON_INDEX["DPAD_L"]] = 1.0
+        arr[bc.N_BUTTONS] = 1.0
+        arr[bc.N_BUTTONS + 2] = 1.0
+        back = mirror.mirror_action(arr)
+        self.assertEqual(back[bc.BUTTON_INDEX["DPAD_R"]], 1.0)
+        self.assertEqual(back[bc.N_BUTTONS], -1.0)
+        self.assertEqual(back[bc.N_BUTTONS + 2], -1.0)
+
+    def test_mirrored_episode_flips_obs_and_action(self):
+        from rl.rl import mirror
+        base = _FakeMirrorEnv()
+        base.setup_observations = [base.obs.copy()]
+        base.setup_action = self._action()
+        env = mirror.MirrorWrapper(base, mirror_prob=1.0)
+        obs, _info = env.reset(seed=0)
+        np.testing.assert_allclose(obs, bc.mirror_obs(base.obs))
+        np.testing.assert_allclose(env.setup_observations[0],
+                                   bc.mirror_obs(base.obs))
+        self.assertEqual(env.setup_action["stick"][0], -1.0)
+        env.step(self._action())
+        self.assertEqual(base.action["stick"][0], -1.0)
+        self.assertEqual(
+            base.action["buttons"][bc.BUTTON_INDEX["DPAD_R"]], 1.0)
+
+    def test_normal_episode_passes_through(self):
+        from rl.rl import mirror
+        base = _FakeMirrorEnv()
+        env = mirror.MirrorWrapper(base, mirror_prob=0.0)
+        obs, _info = env.reset(seed=0)
+        np.testing.assert_allclose(obs, base.obs)
+        action = self._action()
+        env.step(action)
+        self.assertEqual(base.action["stick"][0], 1.0)
+        self.assertEqual(
+            base.action["buttons"][bc.BUTTON_INDEX["DPAD_L"]], 1.0)
+
+
 class PPOUpdateTest(unittest.TestCase):
     def test_update_and_mock_rollout_are_finite(self):
         import tempfile

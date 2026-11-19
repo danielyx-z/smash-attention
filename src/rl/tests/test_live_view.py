@@ -186,6 +186,44 @@ class ShmSourceTests(unittest.TestCase):
             fix.close()
 
 
+class AdjacentGeometryTest(unittest.TestCase):
+    class Root:
+        def winfo_screenwidth(self):
+            return 1920
+
+        def winfo_screenheight(self):
+            return 1080
+
+    def test_places_to_the_right_when_it_fits(self):
+        from unittest import mock
+        with mock.patch.object(lv, "_game_window_geometry",
+                               return_value=(0, 0, 1280, 720)):
+            w, h, x, y = lv.adjacent_geometry(self.Root(), 1440, 860)
+        self.assertEqual((w, h, x, y), (632, 860, 1288, 0))
+
+    def test_falls_back_below(self):
+        from unittest import mock
+        with mock.patch.object(lv, "_game_window_geometry",
+                               return_value=(0, 0, 1800, 800)):
+            w, h, x, y = lv.adjacent_geometry(self.Root(), 1440, 860)
+        self.assertEqual((w, h, x, y), (1440, 272, 0, 808))
+
+    def test_no_game_leaves_placement_alone(self):
+        from unittest import mock
+        with mock.patch.object(lv, "_game_window_geometry",
+                               return_value=None):
+            w, h, x, y = lv.adjacent_geometry(self.Root(), 1440, 860)
+        self.assertEqual((w, h, x, y), (1440, 860, None, None))
+
+    def test_fullscreen_stays_visible(self):
+        from unittest import mock
+        with mock.patch.object(lv, "_game_window_geometry",
+                               return_value=(0, 0, 1920, 1080)):
+            w, h, x, y = lv.adjacent_geometry(self.Root(), 1440, 860)
+        self.assertEqual((w, h), (640, 860))
+        self.assertEqual((x, y), (1280, 0))
+
+
 class CliTests(unittest.TestCase):
     def test_mock_dump_once_json(self):
         buf = io.StringIO()

@@ -777,6 +777,8 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "doomed_penalty": float(getattr(args, "doomed_penalty", 0.0)),
             "offstage_loss_weight": float(
                 getattr(args, "offstage_loss_weight", 1.0)),
+            "mirror": bool(getattr(args, "mirror", False)),
+            "mirror_prob": float(getattr(args, "mirror_prob", 0.0)),
             "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
             "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
@@ -851,8 +853,15 @@ def main(argv: list[str] | None = None) -> int:
                          "policy mid-fall (training only)")
     ap.add_argument("--drill-setup-steps", type=int, default=180,
                     help="max decisions spent running to the ledge per drill")
+    ap.add_argument("--drill-settle-steps", type=int, default=90,
+                    help="max decisions to wait for a normal spawn before "
+                         "the drill setup")
     ap.add_argument("--recovery-bonus", type=float, default=0.5,
                     help="reward added when the drill returns to the ground")
+    ap.add_argument("--mirror", action="store_true",
+                    help="mirror whole episodes left/right (training only)")
+    ap.add_argument("--mirror-prob", type=float, default=0.5,
+                    help="probability that an episode is mirrored")
     ap.add_argument("--damage-dealt", type=float, default=1.0,
                     help="multiplier on damage dealt in the reward")
     ap.add_argument("--damage-taken", type=float, default=1.0,
@@ -907,8 +916,12 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--offstage-loss-weight must be >= 1")
     if int(args.drill_setup_steps) < 1:
         ap.error("--drill-setup-steps must be >= 1")
+    if int(args.drill_settle_steps) < 0:
+        ap.error("--drill-settle-steps must be >= 0")
     if float(args.recovery_bonus) < 0.0:
         ap.error("--recovery-bonus must be >= 0")
+    if not 0.0 <= float(args.mirror_prob) <= 1.0:
+        ap.error("--mirror-prob must be in [0, 1]")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
         ap.error("--damage-dealt/--damage-taken must be >= 0")
 
@@ -1007,19 +1020,33 @@ def main(argv: list[str] | None = None) -> int:
                 from rl.env.gym_drill import RecoveryDrillEnv
                 env = RecoveryDrillEnv(
                     env, setup_steps=int(args.drill_setup_steps),
+                    settle_reset_steps=int(args.drill_settle_steps),
                     recovery_bonus=float(args.recovery_bonus), log=log)
                 log("[ppo] recovery drill: run P1 off the ledge, then hand "
                     "control to the policy mid-fall")
+
+        if args.mirror:
+            from rl.rl.mirror import MirrorWrapper
+            env = MirrorWrapper(env, mirror_prob=float(args.mirror_prob),
+                                log=log)
+            log(f"[ppo] mirror wrapper: {args.mirror_prob:.0%} of episodes "
+                "are presented left/right flipped")
 
         state = PolicyState(cfg)
 
         def reset_with_recovery(reset_seed: int, exc: Exception):
             nonlocal pad
-            log(f"[ppo] reset failed ({exc}); recovering the pad and retrying")
             if pad is None:
                 raise exc
-            pad = recover_pad(env, pad, args, log)
-            return ge.reset_env(env, reset_seed)
+            for attempt in range(2):
+                log(f"[ppo] reset failed ({exc}); recovering the pad and "
+                    f"retrying ({attempt + 1}/2)")
+                pad = recover_pad(env, pad, args, log)
+                try:
+                    return ge.reset_env(env, reset_seed)
+                except Exception as retry_exc:  # noqa: BLE001
+                    exc = retry_exc
+            raise exc
 
         def episode_log(row: dict) -> None:
             stats_writer.record_episode(row)

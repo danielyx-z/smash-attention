@@ -113,12 +113,14 @@ class RecoveryDrillEnv:
 
     def __init__(self, env: Any, setup_steps: int = 180,
                  settle_steps: int = 2, recovery_bonus: float = 0.5,
-                 attempts: int = 3, log=None):
+                 attempts: int = 3, settle_reset_steps: int = 90,
+                 log=None):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
         self.settle_steps = max(1, int(settle_steps))
         self.recovery_bonus = float(recovery_bonus)
         self.attempts = max(1, int(attempts))
+        self.settle_reset_steps = max(0, int(settle_reset_steps))
         self.log = log or (lambda *_a, **_k: None)
         self.setup_observations: list[np.ndarray] = []
         self.setup_action: dict | None = None
@@ -181,10 +183,24 @@ class RecoveryDrillEnv:
         fighter = _ego(info, self.ego_slot)
         if not fighter:
             raise RuntimeError("recovery drill: reset info has no ego fighter")
+        # The fast rematch can hand back a fighter that is still on the
+        # revival platform.  Wait for a normal on-stage state before running
+        # off the ledge; otherwise the setup immediately breaks on rebirth.
+        observations: list[np.ndarray] = []
+        for _ in range(self.settle_reset_steps):
+            fighter = _ego(info, self.ego_slot)
+            if (not _flag(fighter, "is_on_rebirth")
+                    and _flag(fighter, "on_ground")):
+                break
+            result = self.env.step(_neutral(0.0))
+            obs, _reward, terminated, truncated, info = _split_step(result)
+            observations.append(np.asarray(obs, np.float32))
+            if terminated or truncated:
+                break
+        fighter = _ego(info, self.ego_slot)
         x = _num(fighter, "x")
         direction = -1.0 if x <= 0.0 else 1.0
         action = _neutral(direction)
-        observations: list[np.ndarray] = []
         offstage = False
         for _ in range(self.setup_steps):
             result = self.env.step(action)
