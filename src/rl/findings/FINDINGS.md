@@ -1945,3 +1945,31 @@ So:
 This matches the recovery rule: use the midair jump before Up Special, because
 Up Special ends in helpless special fall.  The next run (`cpu7s`) uses the
 corrected penalty.
+
+### Recovery drill and mirror wrapper
+
+`gym_drill.RecoveryDrillEnv` manufactures recoverable ledge states without a
+runtime teleport:
+
+1. reset the match;
+2. wait out the revival platform (the fast rematch can return a fighter still
+   on rebirth);
+3. run P1 toward the nearest ledge with the stick only, so the midair jump and
+   Up Special stay available;
+4. hand control to the policy mid-fall (setup observations seed its window and
+   `setup_action` seeds `prev`);
+5. end on recovery (small bonus) or death.
+
+Drill training uses **CPU3**, not CPU7: the point is to learn recovery under
+low pressure, not to survive a strong edgeguard while learning.
+
+`rl.rl.mirror.MirrorWrapper` mirrors whole episodes left/right: policy
+observation in, mirrored action to the game, mirrored observation back.  It is
+applied outside the drill wrapper so setup observations and `setup_action` are
+mirrored too.  Token-level mirroring is intentionally avoided; the BC action
+head is an absolute vocabulary.
+
+First live drill episodes: setup ~24-138 decisions, offstage P1 at
+`x≈-98, y≈-10`, several successful recoveries (+1.0 reward, 0 deaths) and
+several deaths (-13 reward).  The viewer now starts beside the game window
+(`[view] window 1440x860+1390+310`) instead of on top of it.
