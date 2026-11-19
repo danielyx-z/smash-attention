@@ -709,6 +709,7 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "kl_model": getattr(args, "kl_model", None),
             "stock_value": float(getattr(args, "stock_value", 0.0)),
             "offstage_penalty": float(getattr(args, "offstage_penalty", 0.0)),
+            "recovery_weight": float(getattr(args, "recovery_weight", 0.0)),
             "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
             "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
@@ -760,6 +761,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-penalty", type=float, default=0.0,
                     help="small per-decision reward penalty while the ego is "
                          "offstage (e.g. 0.01)")
+    ap.add_argument("--recovery-weight", type=float, default=0.0,
+                    help="potential-based reward per world-unit of recovery "
+                         "toward the stage (e.g. 0.02)")
     ap.add_argument("--damage-dealt", type=float, default=1.0,
                     help="multiplier on damage dealt in the reward")
     ap.add_argument("--damage-taken", type=float, default=1.0,
@@ -801,6 +805,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--max-dead-episodes must be >= 0")
     if float(args.offstage_penalty) < 0.0:
         ap.error("--offstage-penalty must be >= 0")
+    if float(args.recovery_weight) < 0.0:
+        ap.error("--recovery-weight must be >= 0")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
         ap.error("--damage-dealt/--damage-taken must be >= 0")
 
@@ -862,7 +868,8 @@ def main(argv: list[str] | None = None) -> int:
                 damage_taken=float(args.damage_taken),
                 ko_bonus=stock_value, stock_loss=-stock_value,
                 win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
-                ego_slot=0, offstage_penalty=float(args.offstage_penalty))
+                ego_slot=0, offstage_penalty=float(args.offstage_penalty),
+                recovery_weight=float(args.recovery_weight))
             reset_fn = None
             try:
                 from rl.input.gym_reset import ResetClient

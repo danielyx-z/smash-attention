@@ -555,6 +555,28 @@ class TestReward(unittest.TestCase):
         self.assertAlmostEqual(
             gym_reward.compute_reward(prev, rebirth, cfg), 0.0)
 
+    def test_recovery_rewards_climbing_back(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0, recovery_weight=0.1)
+        deep = snap([fighter(x=130.0, y=-50.0, on_ground=0),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        higher = snap([fighter(x=130.0, y=-30.0, on_ground=0),
+                       fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(deep, higher, cfg), 2.0)
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(higher, deep, cfg), -2.0)
+        side = snap([fighter(x=130.0, y=50.0, on_ground=0),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(deep, side, cfg), 4.0)
+        rebirth = snap([fighter(x=0.0, y=0.0, on_ground=0,
+                                is_on_rebirth=1),
+                        fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(deep, rebirth, cfg), 0.0)
+
     def test_rebirth_detects_stock_loss_when_stock_unreadable(self):
         cfg = gym_reward.RewardConfig(ko_bonus=1.0, stock_loss=-1.0,
                                       win_bonus=0.0, loss_penalty=0.0)

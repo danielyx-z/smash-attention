@@ -53,6 +53,9 @@ class RewardConfig:
     #: revival platform).  It discourages walking/drifting off the edge
     #: without matching the full stock penalty.
     offstage_penalty: float = 0.0
+    #: Potential-based reward for reducing distance below the stage: moving
+    #: upward/toward recovery gets a bonus, falling gets a matching penalty.
+    recovery_weight: float = 0.0
     stage_half_width: float = 100.0
     stage_top: float = 0.0
 
@@ -68,6 +71,7 @@ class RewardConfig:
             "draw_reward": self.draw_reward,
             "ego_slot": self.ego_slot,
             "offstage_penalty": self.offstage_penalty,
+            "recovery_weight": self.recovery_weight,
             "stage_half_width": self.stage_half_width,
             "stage_top": self.stage_top,
         }
@@ -143,6 +147,19 @@ def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
     return min(1.0, below / 40.0)
 
 
+def _recovery_distance(fighter: dict, cfg: "RewardConfig") -> float:
+    """How far below the stage surface the fighter is (0 on stage)."""
+    if _rebirth(fighter):
+        return 0.0
+    try:
+        if int(fighter.get("on_ground", 0)) == 1:
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    y = _number(fighter, "y")
+    return max(0.0, (float(cfg.stage_top) - 10.0) - y)
+
+
 def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
                    ego_slot: int | None = None) -> float:
     """Combat reward for the transition ``prev -> curr``.
@@ -176,6 +193,9 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     danger = _edge_danger(cf_ego, cfg)
     if cfg.offstage_penalty and danger > 0.0:
         reward -= float(cfg.offstage_penalty) * danger
+    if cfg.recovery_weight and not _rebirth(cf_ego):
+        reward += float(cfg.recovery_weight) * (
+            _recovery_distance(pf_ego, cfg) - _recovery_distance(cf_ego, cfg))
 
     # stock / KO deltas
     prev_stock_ego, stock_ego = _stock(pf_ego), _stock(cf_ego)
