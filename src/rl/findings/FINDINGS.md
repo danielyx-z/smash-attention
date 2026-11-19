@@ -1913,3 +1913,18 @@ The old `rl_cpu7_best.pt` still wins: 2 deaths, reward -2.25, damage +2.4,
 stock-adjusted -197.6.  Both edgeguard variants reduced the training death
 rate slightly but lost too much damage.  Keep `rl_cpu7_best.pt` as the best
 live checkpoint until a new approach is evaluated on more than 5 episodes.
+
+### Dense recovery experiment
+
+Three changes, trained from `rl_cpu7_best.pt` with `gamma=0.995, lam=0.95`:
+
+* `--recovery-ledge --recovery-weight 0.05`: the recovery potential is 2-D
+  distance to the nearest ledge, so climbing and moving toward the ledge both
+  pay, not just gaining height.
+* `--doomed-penalty 0.05`: below the stage, falling, and out of jumps ramps a
+  penalty toward the blast bottom, so a doomed fall is paid before respawn.
+* `--offstage-loss-weight 3.0`: offstage transitions are 3x in the policy and
+  Huber value losses, so the critic does not fit only common on-stage states.
+
+The edgeguard terms are off in this run.  The aim is to separate recovery
+shaping from the edgeguard reward that regressed the previous checkpoints.
