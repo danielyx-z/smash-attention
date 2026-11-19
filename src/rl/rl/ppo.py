@@ -619,7 +619,11 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
             policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = F.mse_loss(out["value"], returns)
+            # Huber, not MSE: stock/death returns are sparse and large (one
+            # -5.0 among thousands of near-zero steps).  Squared error on those
+            # outliers produced a value loss of ~6 and corrupted the shared
+            # trunk, taking the policy with it.
+            value_loss = F.smooth_l1_loss(out["value"], returns)
             entropy = dist.entropy().mean()
             if ref_logits is not None and kl_coef > 0.0:
                 ref_dist = Categorical(
@@ -709,6 +713,8 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "kl_model": getattr(args, "kl_model", None),
             "stock_value": float(getattr(args, "stock_value", 0.0)),
             "offstage_penalty": float(getattr(args, "offstage_penalty", 0.0)),
+            "opponent_offstage_reward": float(
+                getattr(args, "opponent_offstage_reward", 0.0)),
             "recovery_weight": float(getattr(args, "recovery_weight", 0.0)),
             "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
             "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
@@ -761,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-penalty", type=float, default=0.0,
                     help="small per-decision reward penalty while the ego is "
                          "offstage (e.g. 0.01)")
+    ap.add_argument("--opponent-offstage-reward", type=float, default=0.0,
+                    help="positive per-decision reward while the opponent is "
+                         "below the stage (mirror of --offstage-penalty)")
     ap.add_argument("--recovery-weight", type=float, default=0.0,
                     help="potential-based reward per world-unit of recovery "
                          "toward the stage (e.g. 0.02)")
@@ -805,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--max-dead-episodes must be >= 0")
     if float(args.offstage_penalty) < 0.0:
         ap.error("--offstage-penalty must be >= 0")
+    if float(args.opponent_offstage_reward) < 0.0:
+        ap.error("--opponent-offstage-reward must be >= 0")
     if float(args.recovery_weight) < 0.0:
         ap.error("--recovery-weight must be >= 0")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
@@ -869,6 +880,8 @@ def main(argv: list[str] | None = None) -> int:
                 ko_bonus=stock_value, stock_loss=-stock_value,
                 win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
                 ego_slot=0, offstage_penalty=float(args.offstage_penalty),
+                opponent_offstage_reward=float(
+                    args.opponent_offstage_reward),
                 recovery_weight=float(args.recovery_weight))
             reset_fn = None
             try:

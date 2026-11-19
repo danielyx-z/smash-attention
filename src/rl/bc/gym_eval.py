@@ -203,6 +203,8 @@ def reward_config_from_checkpoint(policy) -> object | None:
         win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
         ego_slot=0,
         offstage_penalty=float(meta.get("offstage_penalty", 0.0) or 0.0),
+        opponent_offstage_reward=float(
+            meta.get("opponent_offstage_reward", 0.0) or 0.0),
         recovery_weight=float(meta.get("recovery_weight", 0.0) or 0.0))
 
 

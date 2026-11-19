@@ -53,6 +53,10 @@ class RewardConfig:
     #: revival platform).  It discourages walking/drifting off the edge
     #: without matching the full stock penalty.
     offstage_penalty: float = 0.0
+    #: Positive per-decision reward while the opponent is below the stage,
+    #: mirroring ``offstage_penalty``.  This pays for edgeguarding: keeping the
+    #: opponent offstage is progress, whether or not the KO lands.
+    opponent_offstage_reward: float = 0.0
     #: Potential-based reward for reducing distance below the stage: moving
     #: upward/toward recovery gets a bonus, falling gets a matching penalty.
     recovery_weight: float = 0.0
@@ -71,6 +75,7 @@ class RewardConfig:
             "draw_reward": self.draw_reward,
             "ego_slot": self.ego_slot,
             "offstage_penalty": self.offstage_penalty,
+            "opponent_offstage_reward": self.opponent_offstage_reward,
             "recovery_weight": self.recovery_weight,
             "stage_half_width": self.stage_half_width,
             "stage_top": self.stage_top,
@@ -193,6 +198,11 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     danger = _edge_danger(cf_ego, cfg)
     if cfg.offstage_penalty and danger > 0.0:
         reward -= float(cfg.offstage_penalty) * danger
+    # Mirror of the ego offstage penalty: the opponent being below the stage is
+    # good for the ego, so edgeguarding pays even before the KO.
+    opp_danger = _edge_danger(cf_opp, cfg)
+    if cfg.opponent_offstage_reward and opp_danger > 0.0:
+        reward += float(cfg.opponent_offstage_reward) * opp_danger
     if cfg.recovery_weight and not _rebirth(cf_ego):
         reward += float(cfg.recovery_weight) * (
             _recovery_distance(pf_ego, cfg) - _recovery_distance(cf_ego, cfg))

@@ -555,6 +555,41 @@ class TestReward(unittest.TestCase):
         self.assertAlmostEqual(
             gym_reward.compute_reward(prev, rebirth, cfg), 0.0)
 
+    def test_opponent_offstage_reward(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0,
+            opponent_offstage_reward=0.05)
+        prev = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        # P2 below the stage: the ego is paid for edgeguarding.
+        off = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                    fighter(x=130.0, y=-60.0, on_ground=0)])
+        self.assertAlmostEqual(gym_reward.compute_reward(prev, off, cfg), 0.05)
+        # Horizontal side play is not rewarded.
+        side = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                     fighter(x=130.0, y=50.0, on_ground=0)])
+        self.assertAlmostEqual(gym_reward.compute_reward(prev, side, cfg), 0.0)
+        # The same gradual ramp as the ego offstage penalty.
+        shallow = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                        fighter(x=130.0, y=-20.0, on_ground=0)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, shallow, cfg), 0.0125)
+        # No reward while P2 is on the revival platform.
+        rebirth = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                        fighter(x=130.0, y=-60.0, on_ground=0,
+                                is_on_rebirth=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(prev, rebirth, cfg), 0.0)
+        # Ego offstage and opponent offstage are independent terms.
+        both = snap([fighter(x=130.0, y=-60.0, on_ground=0),
+                     fighter(x=130.0, y=-60.0, on_ground=0)])
+        cfg2 = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0, offstage_penalty=0.05,
+            opponent_offstage_reward=0.05)
+        self.assertAlmostEqual(gym_reward.compute_reward(prev, both, cfg2), 0.0)
+
     def test_recovery_rewards_climbing_back(self):
         cfg = gym_reward.RewardConfig(
             damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
