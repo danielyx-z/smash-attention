@@ -2033,3 +2033,19 @@ drill maintained it.  `rl_cpu7_drill_best.pt` remains the best:
 
 All mixed-run checkpoints were deleted; `data/models` now keeps only
 `rl_cpu7_drill_best.pt` and the BC/KL anchor `bc_dk9_30hz_vocab_egoswap.pt`.
+
+### 80% drill / 20% normal: final still regressed
+
+Two CPU4 drill chunks (67% and 63% recovery) and two short CPU7 normal chunks
+(6/12 and 5/12 deaths).  The final CPU7 eval:
+
+* 7 P1 deaths / 10;
+* damage diff +26.2;
+* stock-adjusted -273.8.
+
+The normal chunks still pull the policy away from the drill optimum.  The
+second drill checkpoint (`rl_cpu7d2_c02a_drill.pt`) is being evaluated to see
+whether the drill phase itself improved before the last normal chunk.
+
+`rl_cpu7_drill_best.pt` remains the best known checkpoint
+(2 deaths / 10, +31.7, -18.3).
