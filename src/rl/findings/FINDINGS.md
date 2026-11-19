@@ -1897,3 +1897,19 @@ P2 below the stage and charged when P2 recovers, with no free reward for the
 CPU's own offstage time.  The relaunch from `rl_cpu7_best.pt` uses
 `opponent_offstage_potential=0.1`, `opponent_offstage_reward=0`,
 `recovery_weight=0.02`, `offstage_penalty=0.01`, `gamma=0.997`, `lam=0.99`.
+
+### Potential-based edgeguard run: also no eval win
+
+From `rl_cpu7_best.pt`, 20 iterations with
+`opponent_offstage_potential=0.1`, `opponent_offstage_reward=0`,
+`recovery_weight=0.02`, `offstage_penalty=0.01`, `gamma=0.997`, `lam=0.99`:
+
+* training: 50 P1 deaths in 72 episodes (0.69/episode);
+* best rollout: chunk 2 iteration 3, 1 death, reward -1.94, damage +9.5;
+* death-aware eval of `rl_cpu7p_chunk_02_iter002.pt` (5 episodes):
+  4 P1 deaths, reward -6.24, damage -38.4, stock-adjusted -338.4.
+
+The old `rl_cpu7_best.pt` still wins: 2 deaths, reward -2.25, damage +2.4,
+stock-adjusted -197.6.  Both edgeguard variants reduced the training death
+rate slightly but lost too much damage.  Keep `rl_cpu7_best.pt` as the best
+live checkpoint until a new approach is evaluated on more than 5 episodes.
