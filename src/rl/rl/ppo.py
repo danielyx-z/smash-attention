@@ -779,6 +779,11 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
                 getattr(args, "offstage_loss_weight", 1.0)),
             "mirror": bool(getattr(args, "mirror", False)),
             "mirror_prob": float(getattr(args, "mirror_prob", 0.0)),
+            "recovery_drill": bool(getattr(args, "recovery_drill", False)),
+            "drill_setup_steps": int(
+                getattr(args, "drill_setup_steps", 0)),
+            "drill_prob": float(getattr(args, "drill_prob", 0.0)),
+            "recovery_bonus": float(getattr(args, "recovery_bonus", 0.0)),
             "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
             "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
@@ -858,6 +863,9 @@ def main(argv: list[str] | None = None) -> int:
                          "the drill setup")
     ap.add_argument("--recovery-bonus", type=float, default=0.5,
                     help="reward added when the drill returns to the ground")
+    ap.add_argument("--drill-prob", type=float, default=1.0,
+                    help="fraction of episodes that use the recovery drill "
+                         "(1 = drill only, 0 = normal episodes)")
     ap.add_argument("--mirror", action="store_true",
                     help="mirror whole episodes left/right (training only)")
     ap.add_argument("--mirror-prob", type=float, default=0.5,
@@ -920,6 +928,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--drill-settle-steps must be >= 0")
     if float(args.recovery_bonus) < 0.0:
         ap.error("--recovery-bonus must be >= 0")
+    if not 0.0 <= float(args.drill_prob) <= 1.0:
+        ap.error("--drill-prob must be in [0, 1]")
     if not 0.0 <= float(args.mirror_prob) <= 1.0:
         ap.error("--mirror-prob must be in [0, 1]")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
@@ -1021,7 +1031,8 @@ def main(argv: list[str] | None = None) -> int:
                 env = RecoveryDrillEnv(
                     env, setup_steps=int(args.drill_setup_steps),
                     settle_reset_steps=int(args.drill_settle_steps),
-                    recovery_bonus=float(args.recovery_bonus), log=log)
+                    recovery_bonus=float(args.recovery_bonus),
+                    drill_prob=float(args.drill_prob), log=log)
                 log("[ppo] recovery drill: run P1 off the ledge, then hand "
                     "control to the policy mid-fall")
 

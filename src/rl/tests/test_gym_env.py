@@ -552,6 +552,16 @@ class RecoveryDrillTest(unittest.TestCase):
         self.assertTrue(terminated)
         self.assertAlmostEqual(reward, 0.5)
 
+    def test_drill_prob_zero_keeps_normal_episodes(self):
+        from rl.env import gym_drill
+        env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("recover"),
+                                         drill_prob=0.0)
+        obs, info = env.reset(seed=0)
+        self.assertIsNone(env.setup_action)
+        self.assertEqual(env.setup_observations, [])
+        obs, reward, terminated, truncated, info = env.step({})
+        self.assertFalse(terminated)
+
     def test_death_ends_the_drill(self):
         from rl.env import gym_drill
         env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("death"),

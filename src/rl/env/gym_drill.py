@@ -114,14 +114,16 @@ class RecoveryDrillEnv:
     def __init__(self, env: Any, setup_steps: int = 180,
                  settle_steps: int = 2, recovery_bonus: float = 0.5,
                  attempts: int = 3, settle_reset_steps: int = 90,
-                 log=None):
+                 drill_prob: float = 1.0, log=None):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
         self.settle_steps = max(1, int(settle_steps))
         self.recovery_bonus = float(recovery_bonus)
         self.attempts = max(1, int(attempts))
         self.settle_reset_steps = max(0, int(settle_reset_steps))
+        self.drill_prob = min(1.0, max(0.0, float(drill_prob)))
         self.log = log or (lambda *_a, **_k: None)
+        self._drill = True
         self.setup_observations: list[np.ndarray] = []
         self.setup_action: dict | None = None
         self._was_offstage = False
@@ -166,7 +168,30 @@ class RecoveryDrillEnv:
         return None
 
     # -- reset / step -----------------------------------------------------
+    def _choose_drill(self, seed: int | None) -> bool:
+        if self.drill_prob <= 0.0:
+            return False
+        if self.drill_prob >= 1.0:
+            return True
+        if seed is not None:
+            return bool(np.random.default_rng(int(seed)).random()
+                        < self.drill_prob)
+        return bool(np.random.default_rng().random() < self.drill_prob)
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
+        self._drill = self._choose_drill(seed)
+        if not self._drill:
+            result = self.env.reset(seed=seed)
+            obs, info = _split_reset(result)
+            self.setup_observations = []
+            self.setup_action = None
+            self._was_offstage = False
+            self._prev_rebirth = _flag(
+                _ego(info, self.ego_slot), "is_on_rebirth")
+            self._ground_steps = 0
+            self._steps = 0
+            self.log("[drill] normal episode")
+            return obs, info
         last_error: Exception | None = None
         for _attempt in range(self.attempts):
             try:
@@ -231,6 +256,8 @@ class RecoveryDrillEnv:
     def step(self, action):
         result = self.env.step(action)
         obs, reward, terminated, truncated, info = _split_step(result)
+        if not self._drill:
+            return obs, reward, terminated, truncated, info
         fighter = _ego(info, self.ego_slot)
         rebirth = _flag(fighter, "is_on_rebirth")
         if rebirth and not self._prev_rebirth:
