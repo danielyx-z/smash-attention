@@ -1987,3 +1987,17 @@ several deaths (-13 reward).  The viewer now starts beside the game window
 The drill is clearly teaching recovery, but it is drill-only: normal on-stage
 play may have drifted.  The final checkpoint is being evaluated against CPU7 to
 decide whether the next phase should mix drill and normal episodes.
+
+### Drill checkpoint on normal CPU7 (10 episodes)
+
+`rl_cpu7_drill_best.pt` (= `rl_cpu3_drill_chunk_02.pt`), 10 CPU7 episodes:
+
+* 2 P1 deaths / 10 (0.20 per episode), 1 P2 death;
+* damage dealt 81.3, taken 49.6, diff **+31.7**;
+* reward -2.43 (with the dense shaping restored from the checkpoint);
+* stock-adjusted **-18.3**.
+
+Old `rl_cpu7_best.pt` (5 episodes): 2 deaths, diff +2.4, stock-adjusted
+-197.6.  The drill phase improved both recovery and normal damage; the drill
+checkpoint is now the provisional best.  A 10-episode baseline eval is running
+for an apples-to-apples comparison.
