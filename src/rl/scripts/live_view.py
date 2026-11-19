@@ -777,7 +777,7 @@ class LiveView:
             its = int(data.get("iterations", 0) or 0)
             text = "\n".join([
                 f"TRAINING {state}   CPU{cpu}   iter {it}/{its}   eps {eps}",
-                f"positive {pos:5.1f}%   wins {wins} / losses {losses}   "
+                f"dmg-positive {pos:5.1f}%   wins {wins} / losses {losses}   "
                 f"deaths P1 {p1_deaths} / P2 {p2_deaths}",
                 f"current ep {cur_ep}   {cur_steps}/{cur_max or '?'} steps   "
                 f"dealt {cur_dealt:6.1f}   taken {cur_taken:6.1f}   "
@@ -786,7 +786,7 @@ class LiveView:
                 f"mean dealt {mean_d:6.1f}   mean taken {mean_t:6.1f}   "
                 f"mean dmg diff {mean_diff:+6.1f}   last {last_diff:+6.1f}",
                 f"mean reward {mean_rew:+.2f}   last reward {last_rew:+.2f}   "
-                f"reward-positive {reward_pos:4.1f}%",
+                f"rew-positive {reward_pos:4.1f}%",
                 f"PPO loss {float(data.get('policy_loss', 0.0) or 0.0):+.4f}   "
                 f"value {float(data.get('value_loss', 0.0) or 0.0):.4f}   "
                 f"kl_bc {float(data.get('kl_bc', 0.0) or 0.0):.4f}   "
