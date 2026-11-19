@@ -1168,6 +1168,94 @@ class EvalInfoTest(unittest.TestCase):
         self.assertIsNone(r["winner"])
 
 
+class _StubEnsemble:
+    def reset(self):
+        pass
+
+    def act(self, _obs):
+        return {"buttons": np.zeros(bc.N_BUTTONS, np.float32),
+                "stick": np.zeros(2, np.float32),
+                "cstick": np.zeros(2, np.float32), "trigger": 0.0}
+
+
+class ScriptEnv:
+    """One scripted info frame per step, no game."""
+
+    def __init__(self, frames):
+        self.frames = frames
+        self.i = 0
+        self.action_space = ge._Box((16,), -1.0, 1.0)
+
+    def reset(self, seed=None):
+        self.i = 0
+        return np.zeros(bc.OBS_DIM, np.float32), self.frames[0]
+
+    def step(self, action):
+        self.i = min(self.i + 1, len(self.frames) - 1)
+        info = self.frames[self.i]
+        done = self.i >= len(self.frames) - 1
+        return (np.zeros(bc.OBS_DIM, np.float32),
+                float(info.get("reward", 0.0)), False, done, info)
+
+
+def _frame(p1_dmg=0.0, p2_dmg=0.0, p1_rebirth=0, reward=0.0):
+    # stock stays 0, as on the live build; deaths must come from rebirth.
+    return {
+        "stocks": [0, 0],
+        "damages": [p1_dmg, p2_dmg],
+        "raw_fighters": [
+            {"damage": p1_dmg, "stock": 0, "is_on_rebirth": p1_rebirth},
+            {"damage": p2_dmg, "stock": 0, "is_on_rebirth": 0},
+        ],
+        "reward": reward,
+    }
+
+
+class EvalDeathAccountingTest(unittest.TestCase):
+    def test_eval_counts_rebirth_deaths_and_reports_negative_reward(self):
+        frames = [
+            _frame(),
+            _frame(p2_dmg=50.0, reward=0.5),
+            _frame(p1_dmg=20.0, p2_dmg=50.0, reward=-0.2),
+            _frame(p1_rebirth=1, p2_dmg=50.0, reward=-5.0),
+            _frame(p2_dmg=80.0, reward=0.3),
+        ]
+        result = ge.run_episodes(
+            ScriptEnv(frames), _StubEnsemble(), episodes=1, max_steps=4,
+            seed=0, action_format="array", stock_value=5.0,
+            log=lambda *a: None)
+        row = result["results"][0]
+        self.assertEqual(row["p1_deaths"], 1)
+        self.assertEqual(row["p2_deaths"], 0)
+        self.assertAlmostEqual(row["reward"], -4.4)
+        self.assertAlmostEqual(row["damage_dealt"], 80.0)
+        self.assertAlmostEqual(row["damage_taken"], 20.0)
+        # 60 damage of advantage cannot outweigh a -5.0 stock loss.
+        self.assertAlmostEqual(result["mean_damage_diff"], 60.0)
+        self.assertAlmostEqual(result["stock_adjusted_diff"], -440.0)
+        self.assertLess(result["mean_reward"], 0.0)
+
+    def test_make_env_passes_the_checkpoint_reward_config(self):
+        seen = {}
+
+        class Env:
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+
+        module = types.ModuleType("rl.env.gym_env")
+        module.SSBUGymEnv = Env
+        from rl.env.gym_reward import RewardConfig
+        reward = RewardConfig(ko_bonus=5.0, stock_loss=-5.0)
+        with mock.patch.dict(sys.modules, {"rl.env.gym_env": module}):
+            ge.make_env(bc.BCConfig(), episodes=1, max_steps=10, seed=0,
+                        mock=False, log=lambda *a: None,
+                        reward_config=reward)
+        self.assertEqual(seen["reward_mode"], "combat")
+        self.assertIs(seen["reward_config"], reward)
+        self.assertFalse(seen["stock_termination"])
+        self.assertFalse(seen["require_positive_stock"])
+
+
 class FakeSnapshot:
     def __init__(self, fight_on: bool):
         self.fight_on = fight_on

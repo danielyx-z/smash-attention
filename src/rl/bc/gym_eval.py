@@ -178,8 +178,37 @@ def _action_dict(action) -> dict:
 # ---------------------------------------------------------------------------
 # real environment adapter
 # ---------------------------------------------------------------------------
+def reward_config_from_checkpoint(policy) -> object | None:
+    """The PPO reward config stored in an RL checkpoint, if any.
+
+    A BC-only checkpoint has no ``meta.rl`` marker, so eval keeps the old
+    zero-reward env and damage-only report.  An RL checkpoint stores the exact
+    shaping it trained with; using it here makes eval measure the same thing
+    training optimizes, including the per-death stock penalty.
+    """
+    ckpt = getattr(policy, "checkpoint", None) or {}
+    meta = ckpt.get("meta") or {}
+    if not meta.get("rl"):
+        return None
+    try:
+        from rl.env.gym_reward import RewardConfig  # type: ignore
+    except Exception:                             # pragma: no cover - optional
+        return None
+    stock_value = float(meta.get("stock_value", 0.0) or 0.0)
+    return RewardConfig(
+        damage_scale=0.01,
+        damage_dealt=float(meta.get("damage_dealt_mult", 1.0) or 1.0),
+        damage_taken=float(meta.get("damage_taken_mult", 1.0) or 1.0),
+        ko_bonus=stock_value, stock_loss=-stock_value,
+        win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
+        ego_slot=0,
+        offstage_penalty=float(meta.get("offstage_penalty", 0.0) or 0.0),
+        recovery_weight=float(meta.get("recovery_weight", 0.0) or 0.0))
+
+
 def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
-             mock: bool, log=print, input_adapter=None):
+             mock: bool, log=print, input_adapter=None,
+             reward_config=None):
     if not mock:
         try:
             from rl.env.gym_env import SSBUGymEnv  # type: ignore
@@ -193,6 +222,13 @@ def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
         kwargs = {"normalize_obs": cfg.obs_normalize,
                   "damage_mode": getattr(cfg, "damage_mode", "raw"),
                   "frame_skip": cfg.frame_skip, "max_steps": max_steps}
+        if reward_config is not None:
+            # RL checkpoints were trained with combat reward and without
+            # stock-based termination (the live stock field often reads 0).
+            kwargs["reward_mode"] = "combat"
+            kwargs["reward_config"] = reward_config
+            kwargs["stock_termination"] = False
+            kwargs["require_positive_stock"] = False
         if input_adapter is not None:
             kwargs["input_adapter"] = input_adapter
         # Drop only the keywords this constructor does not accept.  Retrying
@@ -485,9 +521,41 @@ def _num(info: dict, *keys, default=None):
     return default
 
 
+def _rebirth_flags(info: dict) -> list[bool]:
+    """[P1_on_rebirth, P2_on_rebirth] from an env info dict.
+
+    The live stock field is unreliable, so training detects a death from the
+    ``is_on_rebirth`` 0 -> 1 transition.  Eval must use the same signal or it
+    will silently report a death-heavy run as a damage win.
+    """
+    out = []
+    for fighter in (info.get("raw_fighters") or [])[:2]:
+        try:
+            out.append(int(fighter.get("is_on_rebirth", 0) or 0) == 1)
+        except (TypeError, ValueError, AttributeError):
+            out.append(False)
+    while len(out) < 2:
+        out.append(False)
+    return out
+
+
+def _raw_damages(info: dict) -> list[float]:
+    """[P1_damage, P2_damage] from the raw fighter frames (0 if unavailable)."""
+    out = []
+    for fighter in (info.get("raw_fighters") or [])[:2]:
+        try:
+            out.append(max(0.0, float(fighter.get("damage", 0.0) or 0.0)))
+        except (TypeError, ValueError, AttributeError):
+            out.append(0.0)
+    while len(out) < 2:
+        out.append(0.0)
+    return out
+
+
 def run_episodes(env, ensemble: bc.TemporalEnsemble, episodes: int,
                  max_steps: int, seed: int, action_format: str = "auto",
-                 mock: bool = False, log=print) -> dict:
+                 mock: bool = False, log=print,
+                 stock_value: float = 0.0) -> dict:
     results = []
     policy_buttons = []
     policy_stick = []
@@ -500,16 +568,34 @@ def run_episodes(env, ensemble: bc.TemporalEnsemble, episodes: int,
         length = 0
         last_info = dict(info)
         peak_damage = {"p1_damage": 0.0, "p2_damage": 0.0}
+        ep_return = 0.0
+        deaths = {"p1": 0, "p2": 0}
+        death_rewards: list[float] = []
+        dealt = 0.0
+        taken = 0.0
+        prev_rebirth = _rebirth_flags(info)
+        prev_damages = _raw_damages(info)
         while not done and length < max_steps:
             action = ensemble.act(_extract_obs(obs))
             env_action = format_action(action, action_format, env)
-            obs, _reward, terminated, truncated, info = step_env(env, env_action)
+            obs, reward, terminated, truncated, info = step_env(env, env_action)
             last_info = dict(info)
+            ep_return += float(reward)
             step_result = _result_from_info(info)
             for key in peak_damage:
                 value = step_result.get(key)
                 if value is not None:
                     peak_damage[key] = max(peak_damage[key], float(value))
+            curr_rebirth = _rebirth_flags(info)
+            for i, key in enumerate(("p1", "p2")):
+                if curr_rebirth[i] and not prev_rebirth[i]:
+                    deaths[key] += 1
+                    death_rewards.append(float(reward))
+            prev_rebirth = curr_rebirth
+            curr_damages = _raw_damages(info)
+            taken += max(0.0, curr_damages[0] - prev_damages[0])
+            dealt += max(0.0, curr_damages[1] - prev_damages[1])
+            prev_damages = curr_damages
             policy_buttons.append(np.asarray(action["buttons"], np.float32))
             policy_stick.append(np.asarray(action["stick"], np.float32))
             policy_cstick.append(np.asarray(action.get("cstick", np.zeros(2)),
@@ -525,11 +611,19 @@ def run_episodes(env, ensemble: bc.TemporalEnsemble, episodes: int,
             "episode": ep,
             "length": length,
             "mock": bool(last_info.get("mock", mock)),
+            "reward": ep_return,
+            "p1_deaths": deaths["p1"],
+            "p2_deaths": deaths["p2"],
+            "death_rewards": death_rewards,
+            "damage_dealt": dealt,
+            "damage_taken": taken,
         })
         results.append(result)
         log(f"[eval] episode {ep + 1}/{episodes}: winner={result['winner']} "
             f"len={length} p1_dmg={results[-1]['p1_damage']} "
-            f"p2_dmg={results[-1]['p2_damage']}")
+            f"p2_dmg={results[-1]['p2_damage']} "
+            f"deaths P1 {deaths['p1']}/P2 {deaths['p2']} "
+            f"reward={ep_return:+.3f}")
 
     buttons = np.stack(policy_buttons) if policy_buttons else \
         np.zeros((0, bc.N_BUTTONS), np.float32)
@@ -544,6 +638,23 @@ def run_episodes(env, ensemble: bc.TemporalEnsemble, episodes: int,
     def _mean(key):
         vals = [r[key] for r in results if r[key] is not None]
         return float(np.mean(vals)) if vals else None
+
+    def _diff(r: dict) -> float:
+        """P1 damage dealt minus taken; falls back to peak damage."""
+        if float(r.get("damage_dealt") or 0.0) or float(r.get("damage_taken") or 0.0):
+            return float(r["damage_dealt"]) - float(r["damage_taken"])
+        return float(r.get("p2_damage") or 0.0) - float(r.get("p1_damage") or 0.0)
+
+    mean_diff = float(np.mean([_diff(r) for r in results])) if results else 0.0
+    total_p1_deaths = sum(int(r["p1_deaths"]) for r in results)
+    total_p2_deaths = sum(int(r["p2_deaths"]) for r in results)
+    # One P1 death is `stock_value` reward, and 100% damage is 1.0 reward, so
+    # a death is worth `stock_value * 100` damage points.  This is the
+    # stock-adjusted differential the raw damage report was hiding.
+    stock_adjusted = (mean_diff
+                      + float(stock_value) * 100.0
+                      * ((total_p2_deaths - total_p1_deaths) / len(results)
+                         if results else 0.0))
 
     policy_stats = {
         "button_rate": {name: float(buttons[:, i].mean())
@@ -571,6 +682,16 @@ def run_episodes(env, ensemble: bc.TemporalEnsemble, episodes: int,
         "mean_episode_length": _mean("length"),
         "mean_p1_damage": _mean("p1_damage"),
         "mean_p2_damage": _mean("p2_damage"),
+        "mean_reward": _mean("reward"),
+        "mean_damage_dealt": _mean("damage_dealt"),
+        "mean_damage_taken": _mean("damage_taken"),
+        "mean_damage_diff": mean_diff,
+        "mean_p1_deaths": _mean("p1_deaths"),
+        "mean_p2_deaths": _mean("p2_deaths"),
+        "total_p1_deaths": total_p1_deaths,
+        "total_p2_deaths": total_p2_deaths,
+        "stock_value": float(stock_value),
+        "stock_adjusted_diff": stock_adjusted,
         "results": results,
         "policy_stats": policy_stats,
         "mock": bool(mock),
@@ -685,6 +806,14 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.action_mode == "vocab" and not args.no_blend:
         log("[eval] note: vocab checkpoints choose whole tokens, so "
             "temporal blending is disabled (use --no-blend to silence)")
+    reward_cfg = None if args.mock else reward_config_from_checkpoint(policy)
+    meta = (getattr(policy, "checkpoint", None) or {}).get("meta") or {}
+    stock_value = float(meta.get("stock_value", 0.0) or 0.0)
+    if reward_cfg is not None and not args.mock:
+        log(f"[eval] combat reward from checkpoint: stock_value={stock_value:g} "
+            f"offstage_penalty={reward_cfg.offstage_penalty:g} "
+            f"recovery_weight={reward_cfg.recovery_weight:g}; "
+            "deaths are counted from is_on_rebirth")
     pad = None
     if args.start_menus and not args.mock:
         from rl.input.gym_input import VirtualPad
@@ -693,7 +822,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         env, is_mock = make_env(policy.cfg, args.episodes, args.max_steps,
                                 args.seed, args.mock, log=log,
-                                input_adapter=pad)
+                                input_adapter=pad,
+                                reward_config=reward_cfg)
     except BaseException:
         if pad is not None:
             pad.destroy()
@@ -707,7 +837,8 @@ def main(argv: list[str] | None = None) -> int:
             log("[eval] giving up: the game is not in a fight (see the menu walk)")
             return 2
         result = run_episodes(env, ensemble, args.episodes, args.max_steps,
-                              args.seed, args.action_format, is_mock, log=log)
+                              args.seed, args.action_format, is_mock, log=log,
+                              stock_value=stock_value)
     except Exception as exc:
         log(f"[eval] episode run failed: {type(exc).__name__}: {exc}")
         return 2
@@ -752,6 +883,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[eval] mean length={result['mean_episode_length']} "
               f"p1_damage={result['mean_p1_damage']} "
               f"p2_damage={result['mean_p2_damage']}")
+        print(f"[eval] deaths P1 total={result['total_p1_deaths']} "
+              f"P2 total={result['total_p2_deaths']} "
+              f"(mean P1 {result['mean_p1_deaths']:.2f} / "
+              f"P2 {result['mean_p2_deaths']:.2f})")
+        print(f"[eval] reward={result['mean_reward']:+.3f} "
+              f"dealt={result['mean_damage_dealt']:.1f} "
+              f"taken={result['mean_damage_taken']:.1f} "
+              f"dmg_diff={result['mean_damage_diff']:+.1f}")
+        if result["stock_value"]:
+            print(f"[eval] stock-adjusted diff="
+                  f"{result['stock_adjusted_diff']:+.1f} "
+                  f"(1 P1 death = -{result['stock_value'] * 100:g}% damage)")
         print(f"[eval] button rate divergence vs {source}: "
               f"{result['comparison']['mean_button_rate_divergence']:.4f}")
         print("[eval] policy button rate: " + ", ".join(
