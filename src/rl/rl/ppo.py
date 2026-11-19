@@ -443,6 +443,23 @@ def _episode_row(info: dict, length: int, ret: float,
             "terminated": bool(terminated), "truncated": bool(truncated)}
 
 
+def prime_state(state: PolicyState, env, obs) -> None:
+    """Reset the policy history, replaying a drill setup if present."""
+    state.reset()
+    for previous in getattr(env, "setup_observations", None) or []:
+        try:
+            state.observe(ge._extract_obs(previous))
+        except Exception:                     # noqa: BLE001
+            break
+    setup_action = getattr(env, "setup_action", None)
+    if setup_action is not None:
+        try:
+            state.set_prev(setup_action)
+        except Exception:                     # noqa: BLE001
+            pass
+    state.observe(ge._extract_obs(obs))
+
+
 def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     vocab: bc.ActionVocab, mean, std, device: str,
                     steps: int, seed: int,
@@ -464,8 +481,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             return on_reset_error(reset_seed, exc)
 
     obs, info = do_reset(seed)
-    state.reset()
-    state.observe(ge._extract_obs(obs))
+    prime_state(state, env, obs)
     ep = 0
     ep_ret = 0.0
     ep_len = 0
@@ -538,8 +554,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                 on_episode(row)
             ep += 1
             obs, info = do_reset(seed + ep)
-            state.reset()
-            state.observe(ge._extract_obs(obs))
+            prime_state(state, env, obs)
             ep_ret = 0.0
             ep_len = 0
             ep_dealt = 0.0
@@ -694,9 +709,11 @@ def recover_pad(env, pad, args, log) -> Any:
     except Exception:                             # noqa: BLE001
         pass
     new_pad = VirtualPad().create()
+    # Training wrappers (e.g. the recovery drill) delegate to a base env.
+    base = getattr(env, "base_env", env)
     # Swap the adapter object the env already resolved.
-    env._input_adapter = new_pad
-    env._input_resolved = True
+    base._input_adapter = new_pad
+    base._input_resolved = True
     ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
     # A controller disconnect can leave the game on a pause overlay even
     # though fight_on stays 1; a few A presses dismiss it.
@@ -708,9 +725,9 @@ def recover_pad(env, pad, args, log) -> Any:
         except Exception:                         # noqa: BLE001
             break
         time.sleep(0.15)
-    if not ge._fight_on(env):
+    if not ge._fight_on(base):
         game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
-        ge.drive_menus(env, new_pad, args.menu_timeout, log=log,
+        ge.drive_menus(base, new_pad, args.menu_timeout, log=log,
                        speed=game_speed)
     return new_pad
 
@@ -829,6 +846,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-loss-weight", type=float, default=1.0,
                     help="per-sample PPO loss multiplier on offstage states "
                          "(1 = uniform; e.g. 3)")
+    ap.add_argument("--recovery-drill", action="store_true",
+                    help="run P1 off the ledge, then hand control to the "
+                         "policy mid-fall (training only)")
+    ap.add_argument("--drill-setup-steps", type=int, default=180,
+                    help="max decisions spent running to the ledge per drill")
+    ap.add_argument("--recovery-bonus", type=float, default=0.5,
+                    help="reward added when the drill returns to the ground")
     ap.add_argument("--damage-dealt", type=float, default=1.0,
                     help="multiplier on damage dealt in the reward")
     ap.add_argument("--damage-taken", type=float, default=1.0,
@@ -881,6 +905,10 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--doomed-penalty must be >= 0")
     if float(args.offstage_loss_weight) < 1.0:
         ap.error("--offstage-loss-weight must be >= 1")
+    if int(args.drill_setup_steps) < 1:
+        ap.error("--drill-setup-steps must be >= 1")
+    if float(args.recovery_bonus) < 0.0:
+        ap.error("--recovery-bonus must be >= 0")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
         ap.error("--damage-dealt/--damage-taken must be >= 0")
 
@@ -971,6 +999,18 @@ def main(argv: list[str] | None = None) -> int:
                                       speed=game_speed):
                     log("[ppo] giving up: no fight")
                     return 2
+        if args.recovery_drill:
+            if args.mock:
+                log("[ppo] --recovery-drill needs the live game; ignoring "
+                    "it for the mock env")
+            else:
+                from rl.env.gym_drill import RecoveryDrillEnv
+                env = RecoveryDrillEnv(
+                    env, setup_steps=int(args.drill_setup_steps),
+                    recovery_bonus=float(args.recovery_bonus), log=log)
+                log("[ppo] recovery drill: run P1 off the ledge, then hand "
+                    "control to the policy mid-fall")
+
         state = PolicyState(cfg)
 
         def reset_with_recovery(reset_seed: int, exc: Exception):
@@ -1001,8 +1041,11 @@ def main(argv: list[str] | None = None) -> int:
                 on_episode=episode_log,
                 on_step=stats_writer.record_step,
                 on_reset_error=reset_with_recovery)
-            dead = [e for e in episodes
-                    if float(e.get("p2_damage", 0.0) or 0.0) <= 0.0]
+            # In a recovery drill P1 may never touch P2, so zero damage is
+            # expected rather than evidence of a stalled pad.
+            dead = [] if args.recovery_drill else [
+                e for e in episodes
+                if float(e.get("p2_damage", 0.0) or 0.0) <= 0.0]
             if len(dead) > int(args.max_dead_episodes):
                 detail = ", ".join(
                     f"ep{e.get('length')} taken={e.get('p1_damage')} "

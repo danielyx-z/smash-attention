@@ -494,6 +494,74 @@ class TestAction(unittest.TestCase):
 # --------------------------------------------------------------------------
 # reward
 # --------------------------------------------------------------------------
+class _DrillFakeEnv:
+    """Scripted env: on stage, then offstage, then recover or die."""
+
+    max_steps = 60
+    ego_slot = 0
+
+    def __init__(self, outcome: str = "recover"):
+        self.outcome = outcome
+        self.i = 0
+        self.action_space = gymnasium_spaces_box()
+
+    def reset(self, seed=None):
+        self.i = 0
+        return np.zeros(8, np.float32), self._info(on_ground=1, y=0.0)
+
+    def _info(self, on_ground=0, y=-20.0, rebirth=0, x=-110.0):
+        return {"raw_fighters": [
+            {"x": x, "y": y, "on_ground": on_ground,
+             "is_on_rebirth": rebirth, "damage": 0.0},
+            {"x": 20.0, "y": 0.0, "on_ground": 1,
+             "is_on_rebirth": 0, "damage": 0.0},
+        ]}
+
+    def step(self, action):
+        self.i += 1
+        if self.i <= 2:
+            info = self._info(on_ground=1, y=0.0)
+        elif self.i <= 3:
+            info = self._info()
+        elif self.outcome == "death":
+            info = self._info(y=-90.0, rebirth=1)
+        else:
+            info = self._info(on_ground=1, y=0.0, x=-90.0)
+        return (np.zeros(8, np.float32), -5.0 if self.outcome == "death"
+                and self.i > 3 else 0.0, False, False, info)
+
+
+def gymnasium_spaces_box():
+    from gymnasium import spaces
+    return spaces.Box(-1.0, 1.0, (17,), np.float32)
+
+
+class RecoveryDrillTest(unittest.TestCase):
+    def test_setup_runs_offstage_then_hands_control(self):
+        from rl.env import gym_drill
+        env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("recover"),
+                                         setup_steps=10,
+                                         recovery_bonus=0.5)
+        obs, info = env.reset(seed=0)
+        self.assertTrue(gym_drill.is_offstage(info))
+        self.assertIsNotNone(env.setup_action)
+        self.assertTrue(len(env.setup_observations) >= 1)
+        obs, reward, terminated, truncated, info = env.step({})
+        self.assertEqual(terminated, False)
+        obs, reward, terminated, truncated, info = env.step({})
+        self.assertTrue(terminated)
+        self.assertAlmostEqual(reward, 0.5)
+
+    def test_death_ends_the_drill(self):
+        from rl.env import gym_drill
+        env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("death"),
+                                         setup_steps=10)
+        env.reset(seed=0)
+        obs, reward, terminated, truncated, info = env.step({})
+        self.assertTrue(terminated)
+        self.assertLessEqual(reward, 0.0)
+
+
 class TestReward(unittest.TestCase):
     def test_damage_deltas(self):
         prev = snap([fighter(damage=10.0), fighter(damage=20.0)])
