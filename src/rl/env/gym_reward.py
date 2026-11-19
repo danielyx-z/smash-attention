@@ -124,11 +124,11 @@ def _rebirth(fighter: dict) -> bool:
 
 
 def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
-    """0..1 danger factor for being high/offstage near an edge.
+    """0..1 danger factor for falling *below* the stage.
 
-    The old binary check only fired after P1 was already past the stage edge.
-    This ramps up from 20 world units inside the edge and below the stage top,
-    so approaching the edge while airborne is penalized before the fall.
+    Horizontal edge play is deliberately not penalized (chasing or recovering
+    at the side is legitimate).  The penalty ramps in only once the fighter is
+    below the stage surface, and maxes out well below it.
     """
     if _rebirth(fighter):
         return 0.0
@@ -138,12 +138,9 @@ def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
         airborne = False
     if not airborne:
         return 0.0
-    x = _number(fighter, "x")
     y = _number(fighter, "y")
-    margin = 20.0
-    dx = max(0.0, abs(x) - (float(cfg.stage_half_width) - margin))
-    dy = max(0.0, (float(cfg.stage_top) - 10.0) - y)
-    return min(1.0, (dx + dy) / 40.0)
+    below = max(0.0, (float(cfg.stage_top) - 10.0) - y)
+    return min(1.0, below / 40.0)
 
 
 def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,

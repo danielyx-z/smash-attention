@@ -533,20 +533,23 @@ class TestReward(unittest.TestCase):
             win_bonus=0.0, loss_penalty=0.0, offstage_penalty=0.05)
         prev = snap([fighter(x=0.0, y=0.0, on_ground=1),
                      fighter(x=0.0, y=0.0, on_ground=1)])
-        off = snap([fighter(x=130.0, y=-20.0, on_ground=0),
+        off = snap([fighter(x=130.0, y=-60.0, on_ground=0),
                     fighter(x=0.0, y=0.0, on_ground=1)])
         self.assertAlmostEqual(gym_reward.compute_reward(prev, off, cfg), -0.05)
         on = snap([fighter(x=0.0, y=0.0, on_ground=1),
                    fighter(x=0.0, y=0.0, on_ground=1)])
         self.assertAlmostEqual(gym_reward.compute_reward(prev, on, cfg), 0.0)
-        # The penalty ramps in before the edge: x=90 is 10 units into the
-        # 20-unit warning margin, so danger=0.25.
-        near = snap([fighter(x=90.0, y=50.0, on_ground=0),
+        # Horizontal edge play is legitimate: x=130 but y=50 is not penalized.
+        side = snap([fighter(x=130.0, y=50.0, on_ground=0),
                      fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(gym_reward.compute_reward(prev, side, cfg), 0.0)
+        # Just below the surface ramps in gradually: y=-20 -> danger 0.25.
+        shallow = snap([fighter(x=130.0, y=-20.0, on_ground=0),
+                        fighter(x=0.0, y=0.0, on_ground=1)])
         self.assertAlmostEqual(
-            gym_reward.compute_reward(prev, near, cfg), -0.0125)
+            gym_reward.compute_reward(prev, shallow, cfg), -0.0125)
         # A fighter on the revival platform is not penalized.
-        rebirth = snap([fighter(x=130.0, y=-20.0, on_ground=0,
+        rebirth = snap([fighter(x=130.0, y=-60.0, on_ground=0,
                                 is_on_rebirth=1),
                         fighter(x=0.0, y=0.0, on_ground=1)])
         self.assertAlmostEqual(
