@@ -1890,3 +1890,10 @@ happens to be offstage (it is below the stage ~11% of frames), which is largely
 independent of the ego's actions and may have traded away damage.  A
 potential-based opponent term (pay when their danger increases, charge when
 they recover) is the causal version to try next.
+
+`opponent_offstage_potential` is the causal version: reward
+`w * (danger_P2(curr) - danger_P2(prev))`, so the ego is paid when it pushes
+P2 below the stage and charged when P2 recovers, with no free reward for the
+CPU's own offstage time.  The relaunch from `rl_cpu7_best.pt` uses
+`opponent_offstage_potential=0.1`, `opponent_offstage_reward=0`,
+`recovery_weight=0.02`, `offstage_penalty=0.01`, `gamma=0.997`, `lam=0.99`.
