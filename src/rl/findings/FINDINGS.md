@@ -1928,3 +1928,20 @@ Three changes, trained from `rl_cpu7_best.pt` with `gamma=0.995, lam=0.95`:
 
 The edgeguard terms are off in this run.  The aim is to separate recovery
 shaping from the edgeguard reward that regressed the previous checkpoints.
+
+### Recovery order: jump before Up Special
+
+The doomed-fall penalty now requires the **helpless** action state, not merely
+"no jumps".  Action states 20/21 (`FALL_SPECIAL`, `FALL_SPECIAL_AERIAL`) are
+special fall after Up Special; states 36/40 (`SPECIAL_HI*`) are the Up Special
+itself; 18/19 are a normal fall.
+
+So:
+
+* no jumps but `FALL` -> Up Special is still available, not doomed;
+* currently using Up Special -> not doomed yet;
+* `FALL_SPECIAL` below the stage, falling -> doomed; the ramp applies.
+
+This matches the recovery rule: use the midair jump before Up Special, because
+Up Special ends in helpless special fall.  The next run (`cpu7s`) uses the
+corrected penalty.
