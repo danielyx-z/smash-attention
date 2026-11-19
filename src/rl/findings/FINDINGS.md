@@ -2016,3 +2016,20 @@ for an apples-to-apples comparison.
 The recovery drill is a clear win: half the deaths, ~58 more damage
 differential, and a stock-adjusted score near zero instead of -226.  Keep the
 old checkpoint in `saved_20261119/`; the drill checkpoint is the new best.
+
+### Mixed CPU7 normal + CPU4 drill: regression
+
+Five chunks: two CPU7 normal, one CPU4 drill (24 episodes, 62% recovered),
+two CPU7 normal.  The final CPU7 eval was worse:
+
+* 6 P1 deaths / 10;
+* damage dealt 49.9, taken 70.9, diff -21.0;
+* reward -8.88;
+* stock-adjusted -321.0.
+
+The normal CPU7 chunks eroded the recovery skill faster than the 20% CPU4
+drill maintained it.  `rl_cpu7_drill_best.pt` remains the best:
+2 deaths / 10, damage +31.7, stock-adjusted -18.3.
+
+All mixed-run checkpoints were deleted; `data/models` now keeps only
+`rl_cpu7_drill_best.pt` and the BC/KL anchor `bc_dk9_30hz_vocab_egoswap.pt`.
