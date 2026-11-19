@@ -207,7 +207,9 @@ def reward_config_from_checkpoint(policy) -> object | None:
             meta.get("opponent_offstage_reward", 0.0) or 0.0),
         opponent_offstage_potential=float(
             meta.get("opponent_offstage_potential", 0.0) or 0.0),
-        recovery_weight=float(meta.get("recovery_weight", 0.0) or 0.0))
+        recovery_weight=float(meta.get("recovery_weight", 0.0) or 0.0),
+        recovery_ledge=bool(meta.get("recovery_ledge", False)),
+        doomed_penalty=float(meta.get("doomed_penalty", 0.0) or 0.0))
 
 
 def make_env(cfg: bc.BCConfig, episodes: int, max_steps: int, seed: int,
@@ -818,7 +820,9 @@ def main(argv: list[str] | None = None) -> int:
             f"offstage_penalty={reward_cfg.offstage_penalty:g} "
             f"opponent_offstage={reward_cfg.opponent_offstage_reward:g} "
             f"opponent_potential={reward_cfg.opponent_offstage_potential:g} "
-            f"recovery_weight={reward_cfg.recovery_weight:g}; "
+            f"recovery_weight={reward_cfg.recovery_weight:g} "
+            f"recovery_ledge={reward_cfg.recovery_ledge} "
+            f"doomed_penalty={reward_cfg.doomed_penalty:g}; "
             "deaths are counted from is_on_rebirth")
     pad = None
     if args.start_menus and not args.mock:

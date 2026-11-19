@@ -30,6 +30,7 @@ use :class:`types.SimpleNamespace`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -67,6 +68,13 @@ class RewardConfig:
     #: Potential-based reward for reducing distance below the stage: moving
     #: upward/toward recovery gets a bonus, falling gets a matching penalty.
     recovery_weight: float = 0.0
+    #: Use 2-D distance to the nearest ledge instead of vertical depth.  This
+    #: pays for recovering toward the ledge, not just for gaining height.
+    recovery_ledge: bool = False
+    #: Dense penalty while the ego is below the stage, falling, and out of
+    #: jumps.  Ramps toward the blast bottom so a doomed fall is paid for
+    #: before the respawn `-5` arrives.
+    doomed_penalty: float = 0.0
     stage_half_width: float = 100.0
     stage_top: float = 0.0
 
@@ -85,6 +93,8 @@ class RewardConfig:
             "opponent_offstage_reward": self.opponent_offstage_reward,
             "opponent_offstage_potential": self.opponent_offstage_potential,
             "recovery_weight": self.recovery_weight,
+            "recovery_ledge": self.recovery_ledge,
+            "doomed_penalty": self.doomed_penalty,
             "stage_half_width": self.stage_half_width,
             "stage_top": self.stage_top,
         }
@@ -161,7 +171,12 @@ def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
 
 
 def _recovery_distance(fighter: dict, cfg: "RewardConfig") -> float:
-    """How far below the stage surface the fighter is (0 on stage)."""
+    """Recovery distance: vertical depth, or 2-D distance to the nearest ledge.
+
+    Both are 0 while on stage or on the revival platform.  The ledge variant
+    pays for moving up *and* toward a ledge, which is what a real recovery
+    needs; the depth variant is kept for older checkpoints.
+    """
     if _rebirth(fighter):
         return 0.0
     try:
@@ -170,7 +185,55 @@ def _recovery_distance(fighter: dict, cfg: "RewardConfig") -> float:
     except (TypeError, ValueError):
         pass
     y = _number(fighter, "y")
-    return max(0.0, (float(cfg.stage_top) - 10.0) - y)
+    top = float(cfg.stage_top)
+    if getattr(cfg, "recovery_ledge", False):
+        if y >= top - 10.0:
+            return 0.0
+        x = _number(fighter, "x")
+        half = float(cfg.stage_half_width)
+        return min(math.hypot(x + half, y - top),
+                   math.hypot(x - half, y - top))
+    return max(0.0, (top - 10.0) - y)
+
+
+def _doomed_danger(curr: Any, fighter: dict, cfg: "RewardConfig") -> float:
+    """0..1 ramp for a fall that is likely unrecoverable.
+
+    Requires: below the stage, moving downward, and no jumps left.  The ramp
+    runs from just below the stage to the live blast bottom (falling back to
+    ``stage_top - 110`` when the snapshot does not carry a blast zone).
+    """
+    if _rebirth(fighter):
+        return 0.0
+    try:
+        if int(fighter.get("on_ground", 0)) == 1:
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    y = _number(fighter, "y")
+    top = float(cfg.stage_top)
+    if y >= top - 10.0:
+        return 0.0
+    if _number(fighter, "vy") >= 0.0:
+        return 0.0
+    try:
+        if int(fighter.get("jumps_left", 0)) > 0:
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    bottom = None
+    blast = getattr(curr, "blast", None)
+    if blast is not None and len(blast) >= 4:
+        try:
+            bottom = float(blast[3])
+        except (TypeError, ValueError):
+            bottom = None
+    if bottom is None or bottom >= top - 10.0:
+        bottom = top - 110.0
+    span = (top - 10.0) - bottom
+    if span <= 0.0:
+        return 0.0
+    return min(1.0, max(0.0, ((top - 10.0) - y) / span))
 
 
 def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
@@ -217,6 +280,9 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     if cfg.recovery_weight and not _rebirth(cf_ego):
         reward += float(cfg.recovery_weight) * (
             _recovery_distance(pf_ego, cfg) - _recovery_distance(cf_ego, cfg))
+    if cfg.doomed_penalty:
+        reward -= float(cfg.doomed_penalty) * _doomed_danger(
+            curr, cf_ego, cfg)
 
     # stock / KO deltas
     prev_stock_ego, stock_ego = _stock(pf_ego), _stock(cf_ego)

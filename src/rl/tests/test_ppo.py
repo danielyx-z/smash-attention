@@ -190,10 +190,12 @@ class PPOUpdateTest(unittest.TestCase):
                 "values": np.zeros(n, np.float32),
                 "advantages": np.ones(n, np.float32),
                 "returns": np.ones(n, np.float32),
+                "offstage": np.array([0, 1, 0, 1, 0, 1, 0, 1], bool),
             }
             stats = ppo.ppo_update(model, optimizer, batch,
                                    ppo.PPOConfig(epochs=1, minibatch=4,
-                                                 device="cpu"),
+                                                 device="cpu",
+                                                 offstage_loss_weight=3.0),
                                    mean, std, "cpu")
             for value in stats.values():
                 self.assertTrue(np.isfinite(value))
@@ -215,6 +217,7 @@ class PPOUpdateTest(unittest.TestCase):
             self.assertEqual(rollout["actions"].shape, (6,))
             self.assertEqual(rollout["windows"].shape,
                              (6, cfg.window, cfg.obs_dim))
+            self.assertEqual(rollout["offstage"].shape, (6,))
             self.assertTrue(np.isfinite(rollout["rewards"]).all())
             self.assertGreaterEqual(len(episodes), 1)
 

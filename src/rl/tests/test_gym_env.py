@@ -642,6 +642,52 @@ class TestReward(unittest.TestCase):
         self.assertAlmostEqual(
             gym_reward.compute_reward(deep, rebirth, cfg), 0.0)
 
+    def test_recovery_ledge_potential_uses_two_dimensional_distance(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0, recovery_weight=0.1,
+            recovery_ledge=True, stage_half_width=100.0, stage_top=0.0)
+        deep = snap([fighter(x=130.0, y=-40.0, on_ground=0),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        closer = snap([fighter(x=120.0, y=-30.0, on_ground=0),
+                       fighter(x=0.0, y=0.0, on_ground=1)])
+        expected = 0.1 * (float(np.hypot(30.0, 40.0))
+                          - float(np.hypot(20.0, 30.0)))
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(deep, closer, cfg), expected)
+        # Above the stage the potential is 0, so moving there from on stage
+        # pays nothing (climbing out of a deep fall does pay).
+        on = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                   fighter(x=0.0, y=0.0, on_ground=1)])
+        side = snap([fighter(x=130.0, y=50.0, on_ground=0),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(on, side, cfg), 0.0)
+
+    def test_doomed_penalty_ramps_toward_the_blast_zone(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0, doomed_penalty=0.1,
+            stage_top=0.0)
+        on = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                   fighter(x=0.0, y=0.0, on_ground=1)])
+        doomed = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
+                               jumps_left=0),
+                       fighter(x=0.0, y=0.0, on_ground=1)])
+        # Default blast bottom -110: ramp is (60-10)/100 = 0.5.
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(on, doomed, cfg), -0.05)
+        # A jump left, upward motion, or being on stage disables it.
+        for extra in ({"jumps_left": 1}, {"vy": 1.0}):
+            base = {"x": 0.0, "y": -60.0, "on_ground": 0, "vy": -2.0,
+                    "jumps_left": 0}
+            base.update(extra)
+            safe = snap([fighter(**base),
+                         fighter(x=0.0, y=0.0, on_ground=1)])
+            self.assertAlmostEqual(
+                gym_reward.compute_reward(on, safe, cfg), 0.0)
+        self.assertAlmostEqual(gym_reward.compute_reward(on, on, cfg), 0.0)
+
     def test_rebirth_detects_stock_loss_when_stock_unreadable(self):
         cfg = gym_reward.RewardConfig(ko_bonus=1.0, stock_loss=-1.0,
                                       win_bonus=0.0, loss_penalty=0.0)

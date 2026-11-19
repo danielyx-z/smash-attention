@@ -58,6 +58,10 @@ class PPOConfig:
     entropy: float = 0.01
     value_coef: float = 0.5
     kl_coef: float = 0.0
+    #: Per-sample loss multiplier for offstage transitions (1.0 = uniform).
+    #: Offstage states are rare in a 3600-step rollout; weighting them keeps the
+    #: critic from ignoring the states where deaths actually happen.
+    offstage_loss_weight: float = 1.0
     max_grad_norm: float = 0.5
     weight_decay: float = 1e-4
     seed: int = 0
@@ -371,6 +375,26 @@ def _damages(info: dict) -> list[float]:
     return out
 
 
+def _offstage_flag(info: dict, slot: int = 0) -> bool:
+    """True when the ego fighter is below the stage, airborne, not respawning.
+
+    Used only to weight the PPO loss toward the rare states where falls happen;
+    the reward itself is computed by the environment.
+    """
+    fighters = info.get("raw_fighters") or []
+    if len(fighters) <= int(slot):
+        return False
+    fighter = fighters[int(slot)]
+    try:
+        if int(fighter.get("is_on_rebirth", 0) or 0) == 1:
+            return False
+        if int(fighter.get("on_ground", 0) or 0) == 1:
+            return False
+        return float(fighter.get("y", 0.0) or 0.0) < -10.0
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _rebirth_flags(info: dict) -> list[bool]:
     """[P1_on_rebirth, P2_on_rebirth] from an env info dict."""
     out = []
@@ -428,6 +452,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     model.eval()
     windows, prevs, actions, logps, values, rewards = [], [], [], [], [], []
     next_windows, next_prevs, terminals, truncateds = [], [], [], []
+    offstage_flags: list[bool] = []
     episodes: list[dict] = []
 
     def do_reset(reset_seed: int):
@@ -472,6 +497,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         next_prevs.append(state.prev.copy())
         terminals.append(bool(terminated))
         truncateds.append(bool(truncated))
+        offstage_flags.append(_offstage_flag(
+            info, int(getattr(env, "ego_slot", 0) or 0)))
         ep_ret += float(reward)
         ep_len += 1
         step_result = ge._result_from_info(info)
@@ -533,6 +560,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         "next_prevs": np.stack(next_prevs).astype(np.float32),
         "terminals": np.asarray(terminals, np.bool_),
         "truncateds": np.asarray(truncateds, np.bool_),
+        "offstage": np.asarray(offstage_flags, np.bool_),
     }
     return batch, episodes
 
@@ -618,12 +646,22 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
             ratio = torch.exp(logp - old_logp)
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
-            policy_loss = -torch.min(surr1, surr2).mean()
+            # Offstage transitions are rare but decisive.  Up-weight them so
+            # the critic does not fit only the common on-stage states.
+            weights = torch.ones_like(adv)
+            if batch.get("offstage") is not None:
+                off = torch.from_numpy(
+                    np.asarray(batch["offstage"])[idx].astype(np.float32)
+                ).to(device)
+                weights = 1.0 + (float(cfg.offstage_loss_weight) - 1.0) * off
+                weights = weights / weights.mean()
+            policy_loss = (-torch.min(surr1, surr2) * weights).mean()
             # Huber, not MSE: stock/death returns are sparse and large (one
             # -5.0 among thousands of near-zero steps).  Squared error on those
             # outliers produced a value loss of ~6 and corrupted the shared
             # trunk, taking the policy with it.
-            value_loss = F.smooth_l1_loss(out["value"], returns)
+            value_loss = (F.smooth_l1_loss(
+                out["value"], returns, reduction="none") * weights).mean()
             entropy = dist.entropy().mean()
             if ref_logits is not None and kl_coef > 0.0:
                 ref_dist = Categorical(
@@ -718,6 +756,10 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "opponent_offstage_potential": float(
                 getattr(args, "opponent_offstage_potential", 0.0)),
             "recovery_weight": float(getattr(args, "recovery_weight", 0.0)),
+            "recovery_ledge": bool(getattr(args, "recovery_ledge", False)),
+            "doomed_penalty": float(getattr(args, "doomed_penalty", 0.0)),
+            "offstage_loss_weight": float(
+                getattr(args, "offstage_loss_weight", 1.0)),
             "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
             "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
@@ -778,6 +820,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--recovery-weight", type=float, default=0.0,
                     help="potential-based reward per world-unit of recovery "
                          "toward the stage (e.g. 0.02)")
+    ap.add_argument("--recovery-ledge", action="store_true",
+                    help="use 2-D distance to the nearest ledge for the "
+                         "recovery potential instead of vertical depth")
+    ap.add_argument("--doomed-penalty", type=float, default=0.0,
+                    help="dense per-decision penalty while below the stage, "
+                         "falling, and out of jumps (e.g. 0.05)")
+    ap.add_argument("--offstage-loss-weight", type=float, default=1.0,
+                    help="per-sample PPO loss multiplier on offstage states "
+                         "(1 = uniform; e.g. 3)")
     ap.add_argument("--damage-dealt", type=float, default=1.0,
                     help="multiplier on damage dealt in the reward")
     ap.add_argument("--damage-taken", type=float, default=1.0,
@@ -810,6 +861,7 @@ def main(argv: list[str] | None = None) -> int:
         minibatch=args.minibatch, lr=args.lr, gamma=args.gamma,
         lam=args.lam, clip=args.clip, entropy=args.entropy,
         value_coef=args.value_coef, kl_coef=args.kl_coef,
+        offstage_loss_weight=args.offstage_loss_weight,
         weight_decay=args.weight_decay, seed=args.seed,
         device=args.device)
     ppo.check()
@@ -825,6 +877,10 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--opponent-offstage-potential must be >= 0")
     if float(args.recovery_weight) < 0.0:
         ap.error("--recovery-weight must be >= 0")
+    if float(args.doomed_penalty) < 0.0:
+        ap.error("--doomed-penalty must be >= 0")
+    if float(args.offstage_loss_weight) < 1.0:
+        ap.error("--offstage-loss-weight must be >= 1")
     if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
         ap.error("--damage-dealt/--damage-taken must be >= 0")
 
@@ -891,7 +947,9 @@ def main(argv: list[str] | None = None) -> int:
                     args.opponent_offstage_reward),
                 opponent_offstage_potential=float(
                     args.opponent_offstage_potential),
-                recovery_weight=float(args.recovery_weight))
+                recovery_weight=float(args.recovery_weight),
+                recovery_ledge=bool(args.recovery_ledge),
+                doomed_penalty=float(args.doomed_penalty))
             reset_fn = None
             try:
                 from rl.input.gym_reset import ResetClient
