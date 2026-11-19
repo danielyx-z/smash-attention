@@ -645,6 +645,8 @@ def save_checkpoint(path: str, model, cfg: bc.BCConfig,
             "kl_model": getattr(args, "kl_model", None),
             "stock_value": float(getattr(args, "stock_value", 0.0)),
             "offstage_penalty": float(getattr(args, "offstage_penalty", 0.0)),
+            "damage_dealt_mult": float(getattr(args, "damage_dealt", 1.0)),
+            "damage_taken_mult": float(getattr(args, "damage_taken", 1.0)),
             "last_stats": {k: float(v) for k, v in stats.items()},
             "saved_ns": time.time_ns(),
         },
@@ -693,7 +695,11 @@ def main(argv: list[str] | None = None) -> int:
                          "(1.0 = 100%% damage; 0 disables stock terms)")
     ap.add_argument("--offstage-penalty", type=float, default=0.0,
                     help="small per-decision reward penalty while the ego is "
-                         "offstage (e.g. 0.005)")
+                         "offstage (e.g. 0.01)")
+    ap.add_argument("--damage-dealt", type=float, default=1.0,
+                    help="multiplier on damage dealt in the reward")
+    ap.add_argument("--damage-taken", type=float, default=1.0,
+                    help="multiplier on damage taken in the reward")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save-every", type=int, default=1)
     ap.add_argument("--stats-file", default="/tmp/ssbu_training_stats.json",
@@ -731,6 +737,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--max-dead-episodes must be >= 0")
     if float(args.offstage_penalty) < 0.0:
         ap.error("--offstage-penalty must be >= 0")
+    if float(args.damage_dealt) < 0.0 or float(args.damage_taken) < 0.0:
+        ap.error("--damage-dealt/--damage-taken must be >= 0")
 
     log = lambda *a: print(*a, file=sys.stderr, flush=True)  # noqa: E731
     torch.manual_seed(ppo.seed)
@@ -785,7 +793,9 @@ def main(argv: list[str] | None = None) -> int:
             # live stock field is unreadable.
             stock_value = float(args.stock_value)
             reward_cfg = RewardConfig(
-                damage_scale=0.01, damage_dealt=1.0, damage_taken=1.0,
+                damage_scale=0.01,
+                damage_dealt=float(args.damage_dealt),
+                damage_taken=float(args.damage_taken),
                 ko_bonus=stock_value, stock_loss=-stock_value,
                 win_bonus=0.0, loss_penalty=0.0, draw_reward=0.0,
                 ego_slot=0, offstage_penalty=float(args.offstage_penalty))
