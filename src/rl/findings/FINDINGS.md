@@ -1871,3 +1871,22 @@ through the shared trunk.  The value loss now uses `smooth_l1_loss` (Huber),
 which keeps large stock returns from dominating; the relaunch uses
 `recovery_weight=0.02`, `offstage_penalty=0.01`,
 `opponent_offstage_reward=0.02`, `gamma=0.997`, `lam=0.99`.
+
+### Edgeguard run (20 iterations): deaths down, damage down, no net win
+
+From `rl_cpu7_best.pt` with the credit fix plus
+`opponent_offstage_reward=0.02`, `offstage_penalty=0.01`,
+`recovery_weight=0.02`, `gamma=0.997`, `lam=0.99`, Huber value loss:
+
+* training: 43 P1 deaths in 68 episodes (0.63/episode), down from ~1.0;
+* best rollout: chunk 3 iteration 4, 0 deaths, reward +0.15, damage -12.8;
+* death-aware eval of `rl_cpu7e_chunk_03_iter003.pt` (5 episodes):
+  3 P1 deaths, reward -4.94, cumulative damage -55.1,
+  stock-adjusted -355.1.
+
+The old `rl_cpu7_best.pt` remains better: 2 deaths, reward -2.25, damage +2.4,
+stock-adjusted -197.6.  The state-based opponent reward pays whenever the CPU
+happens to be offstage (it is below the stage ~11% of frames), which is largely
+independent of the ego's actions and may have traded away damage.  A
+potential-based opponent term (pay when their danger increases, charge when
+they recover) is the causal version to try next.
