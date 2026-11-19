@@ -634,6 +634,35 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
     return {k: v / max(1, seen) for k, v in stats.items()}
 
 
+def recover_pad(env, pad, args, log) -> Any:
+    """Recreate the virtual pad after P1 input stalls, without rebooting the game."""
+    from rl.input.gym_input import VirtualPad
+    try:
+        pad.destroy()
+    except Exception:                             # noqa: BLE001
+        pass
+    new_pad = VirtualPad().create()
+    # Swap the adapter object the env already resolved.
+    env._input_adapter = new_pad
+    env._input_resolved = True
+    ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
+    # A controller disconnect can leave the game on a pause overlay even
+    # though fight_on stays 1; a few A presses dismiss it.
+    for _ in range(3):
+        try:
+            new_pad.press("A")
+            time.sleep(0.10)
+            new_pad.release_all()
+        except Exception:                         # noqa: BLE001
+            break
+        time.sleep(0.15)
+    if not ge._fight_on(env):
+        game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
+        ge.drive_menus(env, new_pad, args.menu_timeout, log=log,
+                       speed=game_speed)
+    return new_pad
+
+
 def iteration_checkpoint_path(path: str, iteration: int) -> str:
     """``rl_dk9_ppo.pt`` + iter 7 -> ``rl_dk9_ppo_iter007.pt``."""
     root, ext = os.path.splitext(path)
@@ -873,11 +902,20 @@ def main(argv: list[str] | None = None) -> int:
                     f"ep{e.get('length')} taken={e.get('p1_damage')} "
                     f"dealt={e.get('p2_damage')} deaths P1={e.get('p1_deaths')}"
                     for e in dead[:4])
-                stats_writer.finish()
-                raise RuntimeError(
-                    f"{len(dead)}/{len(episodes)} episodes dealt no damage "
-                    f"({detail}); the P1 pad/game likely stalled. Stopping "
-                    "before training on dead data.")
+                log(f"[ppo] dead episode(s): {detail}; recovering the pad "
+                    "instead of restarting the game")
+                if pad is None:
+                    raise RuntimeError(
+                        "dead episode with no pad to recover; rerun with "
+                        "--start-menus")
+                try:
+                    pad = recover_pad(env, pad, args, log)
+                except Exception as exc:          # noqa: BLE001
+                    raise RuntimeError(
+                        f"pad recovery failed after dead episodes ({exc}); "
+                        "stopping with the last checkpoint") from exc
+                log("[ppo] pad recovered; discarding the dead rollout")
+                continue
             next_values = batch_values(
                 model, batch["next_windows"], batch["next_prevs"],
                 mean, std, device)
