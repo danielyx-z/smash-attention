@@ -1833,3 +1833,28 @@ Two practical notes:
   earlier keep their own flag, so the result is valid).
 * keep a copy of a known-good `ssbu_native` + `ssbu_game_eh_o1.so` pair outside
   the tree (`/tmp/opencode/ssbu_backups/`), because there is no atomic replace.
+
+### Death credit assignment: the -5 is real but arrives too late
+
+Checked the overnight CPU7 logs: 594 P1 deaths over 595 episodes, and every
+logged `death_rew` was exactly `-5.0` (or `+5.0` for a P2 death).  The reward
+plumbing is correct.
+
+The problem is the credit horizon.  A death is credited when `is_on_rebirth`
+turns on, i.e. at respawn.  Across `data/il/dk9`, the median fall from below the
+stage to respawn is **61 decisions** at 30 Hz (~2 s).  With `gamma=0.995,
+lam=0.95`, the GAE factor per decision is `0.945`, so only `0.945**61 = 0.032`
+of the `-5.0` reaches the edge decision (~`-0.16`).  The critic agrees: on
+recorded fall states `rl_cpu7_best.pt` predicts `V=-0.25` at fall start and
+`V=-0.59` deep offstage, not anything near `-5`.  Rare catastrophic states are
+too small a fraction of a 3600-step rollout for the value MSE to fit them
+(observed `value_loss ~0.2`).
+
+`gym_eval.py` had a separate reporting bug: it built the env with
+`reward_mode="none"`, discarded the returned reward, and reported only peak
+damage.  It now uses the checkpoint's stored reward config and counts rebirth
+deaths, so eval and training measure the same objective.
+
+Retraining from `rl_cpu7_best.pt` uses `gamma=0.997, lam=0.99`
+(`0.987**61 = 0.45`, ~14x more death credit at the edge) plus dense recovery
+shaping (`recovery_weight=0.05`, `offstage_penalty=0.02`).
