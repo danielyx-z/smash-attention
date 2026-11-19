@@ -2001,3 +2001,18 @@ Old `rl_cpu7_best.pt` (5 episodes): 2 deaths, diff +2.4, stock-adjusted
 -197.6.  The drill phase improved both recovery and normal damage; the drill
 checkpoint is now the provisional best.  A 10-episode baseline eval is running
 for an apples-to-apples comparison.
+
+### Drill checkpoint vs old best (10 CPU7 episodes each)
+
+| metric | old `rl_cpu7_best.pt` | `rl_cpu7_drill_best.pt` |
+|---|---:|---:|
+| P1 deaths | 4 / 10 | **2 / 10** |
+| P2 deaths | 0 / 10 | 1 / 10 |
+| damage dealt | 41.8 | **81.3** |
+| damage taken | 68.1 | **49.6** |
+| damage diff | -26.3 | **+31.7** |
+| stock-adjusted | -226.3 | **-18.3** |
+
+The recovery drill is a clear win: half the deaths, ~58 more damage
+differential, and a stock-adjusted score near zero instead of -226.  Keep the
+old checkpoint in `saved_20261119/`; the drill checkpoint is the new best.
