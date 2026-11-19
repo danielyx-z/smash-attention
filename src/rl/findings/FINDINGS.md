@@ -1858,3 +1858,16 @@ deaths, so eval and training measure the same objective.
 Retraining from `rl_cpu7_best.pt` uses `gamma=0.997, lam=0.99`
 (`0.987**61 = 0.45`, ~14x more death credit at the edge) plus dense recovery
 shaping (`recovery_weight=0.05`, `offstage_penalty=0.02`).
+
+`opponent_offstage_reward` mirrors `offstage_penalty`: the ego is paid while
+the opponent is below the stage (same ramp, no horizontal-edge term), so
+edgeguarding has value even when the KO does not land.  Eval restores the term
+from the checkpoint meta.
+
+The first retry with `recovery_weight=0.05` and plain MSE on the value head
+collapsed after iteration 1: the sparse `-5` returns pushed `value_loss` from
+0.08 to 6.7 and `kl_bc` from 0.06 to 0.84, because the value gradient flows
+through the shared trunk.  The value loss now uses `smooth_l1_loss` (Huber),
+which keeps large stock returns from dominating; the relaunch uses
+`recovery_weight=0.02`, `offstage_penalty=0.01`,
+`opponent_offstage_reward=0.02`, `gamma=0.997`, `lam=0.99`.
