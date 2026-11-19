@@ -422,13 +422,23 @@ def _episode_row(info: dict, length: int, ret: float,
 def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     vocab: bc.ActionVocab, mean, std, device: str,
                     steps: int, seed: int,
-                    on_episode=None, on_step=None) -> tuple[dict, list[dict]]:
+                    on_episode=None, on_step=None,
+                    on_reset_error=None) -> tuple[dict, list[dict]]:
     """Run the live env, returning flat transition arrays and episode rows."""
     model.eval()
     windows, prevs, actions, logps, values, rewards = [], [], [], [], [], []
     next_windows, next_prevs, terminals, truncateds = [], [], [], []
     episodes: list[dict] = []
-    obs, info = ge.reset_env(env, seed)
+
+    def do_reset(reset_seed: int):
+        try:
+            return ge.reset_env(env, reset_seed)
+        except Exception as exc:                  # noqa: BLE001
+            if on_reset_error is None:
+                raise
+            return on_reset_error(reset_seed, exc)
+
+    obs, info = do_reset(seed)
     state.reset()
     state.observe(ge._extract_obs(obs))
     ep = 0
@@ -500,7 +510,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             if on_episode is not None:
                 on_episode(row)
             ep += 1
-            obs, info = ge.reset_env(env, seed + ep)
+            obs, info = do_reset(seed + ep)
             state.reset()
             state.observe(ge._extract_obs(obs))
             ep_ret = 0.0
@@ -876,6 +886,14 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
         state = PolicyState(cfg)
 
+        def reset_with_recovery(reset_seed: int, exc: Exception):
+            nonlocal pad
+            log(f"[ppo] reset failed ({exc}); recovering the pad and retrying")
+            if pad is None:
+                raise exc
+            pad = recover_pad(env, pad, args, log)
+            return ge.reset_env(env, reset_seed)
+
         def episode_log(row: dict) -> None:
             stats_writer.record_episode(row)
             p1 = row.get("p1_damage")
@@ -894,7 +912,8 @@ def main(argv: list[str] | None = None) -> int:
                 env, model, state, cfg, vocab, mean, std, device,
                 int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
                 on_episode=episode_log,
-                on_step=stats_writer.record_step)
+                on_step=stats_writer.record_step,
+                on_reset_error=reset_with_recovery)
             dead = [e for e in episodes
                     if float(e.get("p2_damage", 0.0) or 0.0) <= 0.0]
             if len(dead) > int(args.max_dead_episodes):
