@@ -36,6 +36,11 @@ from typing import Any, Sequence
 
 DEFAULT_EGO_SLOT = 0
 
+#: Action states where the fighter has already used Up Special and is in the
+#: helpless special-fall state: no jump, no attack, only ledge/ground/hit can
+#: save them.  (schema.ACTION_STATE_NAMES: FALL_SPECIAL, FALL_SPECIAL_AERIAL.)
+HELPLESS_ACTION_STATES = frozenset({20, 21})
+
 
 @dataclass(frozen=True)
 class RewardConfig:
@@ -199,9 +204,12 @@ def _recovery_distance(fighter: dict, cfg: "RewardConfig") -> float:
 def _doomed_danger(curr: Any, fighter: dict, cfg: "RewardConfig") -> float:
     """0..1 ramp for a fall that is likely unrecoverable.
 
-    Requires: below the stage, moving downward, and no jumps left.  The ramp
-    runs from just below the stage to the live blast bottom (falling back to
-    ``stage_top - 110`` when the snapshot does not carry a blast zone).
+    The key recovery rule: a midair jump must be used *before* Up Special,
+    because Up Special ends in helpless special fall.  So a fighter with no
+    jumps but an unused Up Special is **not** doomed; only the helpless state
+    (`FALL_SPECIAL` / `FALL_SPECIAL_AERIAL`) is.  The ramp runs from just below
+    the stage to the live blast bottom (falling back to ``stage_top - 110``
+    when the snapshot does not carry a blast zone).
     """
     if _rebirth(fighter):
         return 0.0
@@ -210,17 +218,17 @@ def _doomed_danger(curr: Any, fighter: dict, cfg: "RewardConfig") -> float:
             return 0.0
     except (TypeError, ValueError):
         pass
+    try:
+        if int(fighter.get("action_state", -1)) not in HELPLESS_ACTION_STATES:
+            return 0.0
+    except (TypeError, ValueError):
+        return 0.0
     y = _number(fighter, "y")
     top = float(cfg.stage_top)
     if y >= top - 10.0:
         return 0.0
     if _number(fighter, "vy") >= 0.0:
         return 0.0
-    try:
-        if int(fighter.get("jumps_left", 0)) > 0:
-            return 0.0
-    except (TypeError, ValueError):
-        pass
     bottom = None
     blast = getattr(curr, "blast", None)
     if blast is not None and len(blast) >= 4:

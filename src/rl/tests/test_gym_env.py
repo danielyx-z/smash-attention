@@ -671,21 +671,31 @@ class TestReward(unittest.TestCase):
             stage_top=0.0)
         on = snap([fighter(x=0.0, y=0.0, on_ground=1),
                    fighter(x=0.0, y=0.0, on_ground=1)])
+        # FALL_SPECIAL = 20: Up Special is used and the fighter is helpless.
         doomed = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
-                               jumps_left=0),
+                               jumps_left=0, action_state=20),
                        fighter(x=0.0, y=0.0, on_ground=1)])
         # Default blast bottom -110: ramp is (60-10)/100 = 0.5.
         self.assertAlmostEqual(
             gym_reward.compute_reward(on, doomed, cfg), -0.05)
-        # A jump left, upward motion, or being on stage disables it.
-        for extra in ({"jumps_left": 1}, {"vy": 1.0}):
-            base = {"x": 0.0, "y": -60.0, "on_ground": 0, "vy": -2.0,
-                    "jumps_left": 0}
-            base.update(extra)
-            safe = snap([fighter(**base),
-                         fighter(x=0.0, y=0.0, on_ground=1)])
-            self.assertAlmostEqual(
-                gym_reward.compute_reward(on, safe, cfg), 0.0)
+        # No jumps but a normal fall (18) still has Up Special available.
+        normal_fall = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
+                                    jumps_left=0, action_state=18),
+                            fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(on, normal_fall, cfg), 0.0)
+        # Currently using Up Special (36) is not helpless yet.
+        up_special = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
+                                   jumps_left=0, action_state=36),
+                           fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(on, up_special, cfg), 0.0)
+        # Upward motion and being on stage disable it.
+        rising = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=1.0,
+                               action_state=20),
+                       fighter(x=0.0, y=0.0, on_ground=1)])
+        self.assertAlmostEqual(
+            gym_reward.compute_reward(on, rising, cfg), 0.0)
         self.assertAlmostEqual(gym_reward.compute_reward(on, on, cfg), 0.0)
 
     def test_rebirth_detects_stock_loss_when_stock_unreadable(self):
