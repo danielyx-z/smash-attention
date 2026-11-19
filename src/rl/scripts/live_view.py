@@ -768,6 +768,11 @@ class LiveView:
             mean_t = float(data.get("mean_taken", 0.0) or 0.0)
             mean_diff = float(data.get("mean_diff", 0.0) or 0.0)
             last_diff = float(data.get("last_diff", 0.0) or 0.0)
+            mean_rew = float(data.get("mean_reward", 0.0) or 0.0)
+            last_rew = float(data.get("last_reward", 0.0) or 0.0)
+            reward_pos = 100.0 * float(
+                data.get("reward_positive_rate", 0.0) or 0.0)
+            cur_ret = float(data.get("current_return", 0.0) or 0.0)
             it = int(data.get("iteration", 0) or 0)
             its = int(data.get("iterations", 0) or 0)
             text = "\n".join([
@@ -776,9 +781,12 @@ class LiveView:
                 f"deaths P1 {p1_deaths} / P2 {p2_deaths}",
                 f"current ep {cur_ep}   {cur_steps}/{cur_max or '?'} steps   "
                 f"dealt {cur_dealt:6.1f}   taken {cur_taken:6.1f}   "
-                f"diff {cur_diff:+6.1f}   deaths P1 {cur_p1d} / P2 {cur_p2d}",
+                f"dmg diff {cur_diff:+6.1f}   reward {cur_ret:+.2f}   "
+                f"deaths P1 {cur_p1d} / P2 {cur_p2d}",
                 f"mean dealt {mean_d:6.1f}   mean taken {mean_t:6.1f}   "
-                f"mean diff {mean_diff:+6.1f}   last {last_diff:+6.1f}",
+                f"mean dmg diff {mean_diff:+6.1f}   last {last_diff:+6.1f}",
+                f"mean reward {mean_rew:+.2f}   last reward {last_rew:+.2f}   "
+                f"reward-positive {reward_pos:4.1f}%",
                 f"PPO loss {float(data.get('policy_loss', 0.0) or 0.0):+.4f}   "
                 f"value {float(data.get('value_loss', 0.0) or 0.0):.4f}   "
                 f"kl_bc {float(data.get('kl_bc', 0.0) or 0.0):.4f}   "

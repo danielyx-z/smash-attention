@@ -107,14 +107,19 @@ class TrainingStats:
             "current_dealt": 0.0,
             "current_taken": 0.0,
             "current_diff": 0.0,
+            "current_return": 0.0,
             "current_p1_deaths": 0,
             "current_p2_deaths": 0,
             "sum_dealt": 0.0,
             "sum_taken": 0.0,
             "sum_diff": 0.0,
+            "sum_reward": 0.0,
+            "reward_episodes": 0,
+            "reward_positive": 0,
             "last_dealt": 0.0,
             "last_taken": 0.0,
             "last_diff": 0.0,
+            "last_reward": 0.0,
             "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy": 0.0,
@@ -130,6 +135,9 @@ class TrainingStats:
         self.data["mean_dealt"] = self.data["sum_dealt"] / n
         self.data["mean_taken"] = self.data["sum_taken"] / n
         self.data["mean_diff"] = self.data["sum_diff"] / n
+        rn = max(1, int(self.data["reward_episodes"]))
+        self.data["mean_reward"] = self.data["sum_reward"] / rn
+        self.data["reward_positive_rate"] = self.data["reward_positive"] / eps
         self.data["positive_rate"] = self.data["positive"] / eps
         self.data["win_rate"] = self.data["wins"] / eps
         self.data["updated"] = time.time()
@@ -156,6 +164,7 @@ class TrainingStats:
                 "current_dealt": float(progress.get("dealt", 0.0) or 0.0),
                 "current_taken": float(progress.get("taken", 0.0) or 0.0),
                 "current_diff": float(progress.get("diff", 0.0) or 0.0),
+                "current_return": float(progress.get("return", 0.0) or 0.0),
                 "current_p1_deaths": int(progress.get("p1_deaths", 0) or 0),
                 "current_p2_deaths": int(progress.get("p2_deaths", 0) or 0),
             })
@@ -176,9 +185,18 @@ class TrainingStats:
             "current_dealt": 0.0,
             "current_taken": 0.0,
             "current_diff": 0.0,
+            "current_return": 0.0,
             "current_p1_deaths": 0,
             "current_p2_deaths": 0,
         })
+        ret = row.get("return")
+        if ret is not None:
+            ret = float(ret)
+            self.data["reward_episodes"] += 1
+            self.data["sum_reward"] += ret
+            self.data["last_reward"] = ret
+            if ret > 0.0:
+                self.data["reward_positive"] += 1
         p1, p2 = row.get("p1_damage"), row.get("p2_damage")
         if p1 is not None and p2 is not None:
             dealt, taken = float(p2), float(p1)
@@ -465,6 +483,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                 "dealt": ep_dealt,
                 "taken": ep_taken,
                 "diff": ep_dealt - ep_taken,
+                "return": ep_ret,
                 "p1_deaths": deaths["p1"],
                 "p2_deaths": deaths["p2"],
             })
@@ -861,10 +880,16 @@ def main(argv: list[str] | None = None) -> int:
                          if e["p2_damage"] is not None]
                 taken = [e["p1_damage"] for e in episodes
                          if e["p1_damage"] is not None]
+                rews = [e.get("return") for e in episodes
+                        if e.get("return") is not None]
+                p1d = sum(int(e.get("p1_deaths", 0) or 0) for e in episodes)
+                p2d = sum(int(e.get("p2_deaths", 0) or 0) for e in episodes)
                 log(f"[ppo] iter {iteration}/{ppo.iterations}: "
                     f"steps {len(batch['actions'])} eps {len(episodes)} "
                     f"dealt {np.mean(dealt) if dealt else float('nan'):.1f} "
                     f"taken {np.mean(taken) if taken else float('nan'):.1f} "
+                    f"rew {np.mean(rews) if rews else float('nan'):+.2f} "
+                    f"deaths P1 {p1d}/P2 {p2d} "
                     f"policy {stats['policy_loss']:.4f} "
                     f"value {stats['value_loss']:.4f} "
                     f"entropy {stats['entropy']:.3f} "
