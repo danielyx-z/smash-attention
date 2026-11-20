@@ -161,18 +161,17 @@ SITUATION_GROUND = 0
 # hitstun has 2, tumble/KO 0.
 ACTIONABLE_TERM_MIN = 4
 
-#: Status kinds of a damage reaction (hitstun): DAMAGE* (54-62) and the
-#: knocked-down family (505-511).  476-479 used to be listed here as "tumble",
-#: but they are the special moves (478 is Up-B), so `hitstun` read 1 during
-#: every special; see status_kinds.py.
-DAMAGE_STATUS_KINDS = frozenset(set(range(54, 63)) | set(range(505, 512)))
+#: Status kinds of a damage reaction (hitstun): 71-75, measured as the state
+#: entered after the ego's damage rises.  54-62 / 476-479 / 505-511 used to be
+#: listed here, but 54 is the aerial attack, 476-479 the specials and 505-511
+#: DK's special sub-states, so `hitstun` read 1 during all of those; see
+#: status_kinds.py.
+DAMAGE_STATUS_KINDS = frozenset({71, 72, 73, 74, 75})
 
-#: Status kinds of a held shield.  Confirmed live at 60 Hz by watching the
-#: derived field against the game's own status kind: whenever the fighter is
-#: actually holding shield the status kind is 10 (the CPU brackets it with
-#: jump-squat/attack kinds).  The approximate ACTION_STATE_NAMES table called
-#: 10 "GUARD_OFF"; the live status machine says it is the held guard.
-GUARD_STATUS_KINDS = frozenset({10})
+#: Status kinds of a held shield: 27 (raising) and 28 (held).  Confirmed by
+#: the live scenario suite (ZL held -> 27, 28, then 29 on release; the shield
+#: field was 0 there while it read 1 on status 10, which is JUMP-SQUAT).
+GUARD_STATUS_KINDS = frozenset({27, 28})
 
 
 # ---- fallback is_actionable lookup (only if the term table is unreadable) --

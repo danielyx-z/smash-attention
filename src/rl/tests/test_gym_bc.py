@@ -538,35 +538,66 @@ class MirrorTest(unittest.TestCase):
 
 
 class ShieldFromStatusTest(unittest.TestCase):
-    """CPU guard masks carry 0x8004 (X); the status kind is the real shield."""
+    """The CPU shield is the 0x8 mask bit (decoded Y) in states 27/28.
+
+    0x8004 (X) is the mask of JUMP-SQUAT (state 10), a real jump press; the
+    old relabel mistook it for a spurious guard X and rewrote real jumps."""
 
     def _episode(self, shield_from_status: bool) -> bc.EpisodeData:
         ep = bc.synthetic_episode(12, seed=9)
         raw = ep.raw.copy()
         buttons_raw = ep.buttons_raw.copy()
         raw[:, 0, bc.FIELD_INDEX["action_state"]] = np.tile(
-            np.asarray(bc.GUARD_STATES, np.float32), 4)
+            np.asarray(bc.GUARD_STATES, np.float32), 6)
         raw[:, 1, bc.FIELD_INDEX["action_state"]] = 0.0
-        raw[:, 0, bc.FIELD_INDEX["buttons"]] = np.float32(0x8004)
-        buttons_raw[:, 0] = 0x8004          # CPU guard frame: X bit + 0x8000
+        raw[:, 0, bc.FIELD_INDEX["buttons"]] = np.float32(0x8008)
+        buttons_raw[:, 0] = 0x8008          # CPU guard frame: shield bit
         buttons_raw[:, 1] = 0
         return bc.EpisodeData(ep.index, ep.path, ep.meta, raw, buttons_raw,
                               ep.stick, ep.cstick, ep.trigger, player=0,
                               shield_from_status=shield_from_status)
 
-    def test_guard_frames_become_zl_and_clear_x(self):
+    def test_guard_frames_become_zl_and_clear_y(self):
         ep = self._episode(True)
-        x = bc.BUTTON_INDEX["X"]
+        y = bc.BUTTON_INDEX["Y"]
         zl = bc.BUTTON_INDEX["ZL"]
         for i in range(len(ep.raw)):
             self.assertEqual(float(ep.acts["buttons"][i, zl]), 1.0, i)
-            self.assertEqual(float(ep.acts["buttons"][i, x]), 0.0, i)
+            self.assertEqual(float(ep.acts["buttons"][i, y]), 0.0, i)
         # the raw mask and the raw slot keep the CPU evidence unchanged
-        np.testing.assert_array_equal(ep.buttons_raw[:, 0], 0x8004)
+        np.testing.assert_array_equal(ep.buttons_raw[:, 0], 0x8008)
         np.testing.assert_array_equal(
-            ep.raw[:, 0, bc.FIELD_INDEX["buttons"]], np.float32(0x8004))
+            ep.raw[:, 0, bc.FIELD_INDEX["buttons"]], np.float32(0x8008))
         # target shape is unchanged
         self.assertEqual(ep.acts["buttons"].shape[1], bc.N_BUTTONS)
+
+    def test_jump_squat_keeps_its_x_press(self):
+        ep = bc.synthetic_episode(6, seed=9)
+        raw = ep.raw.copy()
+        buttons_raw = ep.buttons_raw.copy()
+        raw[:, 0, bc.FIELD_INDEX["action_state"]] = 10.0   # JUMP_SQUAT
+        buttons_raw[:, 0] = 0x8004
+        fixed = bc.EpisodeData(ep.index, ep.path, ep.meta, raw, buttons_raw,
+                               ep.stick, ep.cstick, ep.trigger, player=0,
+                               shield_from_status=True)
+        x = bc.BUTTON_INDEX["X"]
+        zl = bc.BUTTON_INDEX["ZL"]
+        for i in range(len(raw)):
+            self.assertEqual(float(fixed.acts["buttons"][i, x]), 1.0, i)
+            self.assertEqual(float(fixed.acts["buttons"][i, zl]), 0.0, i)
+
+    def test_guard_off_keeps_shield_only_while_the_bit_is_set(self):
+        ep = bc.synthetic_episode(4, seed=9)
+        raw = ep.raw.copy()
+        buttons_raw = ep.buttons_raw.copy()
+        raw[:, 0, bc.FIELD_INDEX["action_state"]] = 29.0   # GUARD_OFF
+        buttons_raw[:, 0] = np.array([0x8008, 0x8000, 0x8008, 0x8000])
+        fixed = bc.EpisodeData(ep.index, ep.path, ep.meta, raw, buttons_raw,
+                               ep.stick, ep.cstick, ep.trigger, player=0,
+                               shield_from_status=True)
+        zl = bc.BUTTON_INDEX["ZL"]
+        self.assertEqual([float(v) for v in fixed.acts["buttons"][:, zl]],
+                         [1.0, 0.0, 1.0, 0.0])
 
     def test_non_guard_frames_unchanged(self):
         ep = bc.synthetic_episode(6, seed=9)
@@ -585,22 +616,22 @@ class ShieldFromStatusTest(unittest.TestCase):
 
     def test_flag_off_keeps_raw_mask(self):
         ep = self._episode(False)
-        x = bc.BUTTON_INDEX["X"]
+        y = bc.BUTTON_INDEX["Y"]
         zl = bc.BUTTON_INDEX["ZL"]
         for i in range(len(ep.raw)):
-            self.assertEqual(float(ep.acts["buttons"][i, x]), 1.0, i)
+            self.assertEqual(float(ep.acts["buttons"][i, y]), 1.0, i)
             self.assertEqual(float(ep.acts["buttons"][i, zl]), 0.0, i)
 
     def test_label_count_and_resample(self):
         ep = self._episode(True)
         stats = bc.shield_label_stats([bc.resample_episode(ep)])
-        # 12 decisions, every 5th kept: states 8, 9, 10
+        # 12 decisions, every 5th kept (0, 5, 10): states 27, 28, 27
         self.assertEqual(stats["frames"], 3)
-        self.assertEqual(stats["by_state"], {"8": 1, "9": 1, "10": 1})
-        self.assertEqual(stats["spurious_x_cleared"], 3)
+        self.assertEqual(stats["by_state"], {"27": 2, "28": 1})
+        self.assertEqual(stats["spurious_y_cleared"], 3)
         merged = bc.merge_shield_stats([stats, stats])
         self.assertEqual(merged["frames"], 6)
-        self.assertEqual(merged["spurious_x_cleared"], 6)
+        self.assertEqual(merged["spurious_y_cleared"], 6)
 
 
 class NormalizationTest(unittest.TestCase):
@@ -800,8 +831,9 @@ class GymObsCompatibilityTest(unittest.TestCase):
         # C's 32nd slot is OTHER for unknown/out-of-range states.
         raw = np.zeros((1, 2, len(bc.FIELDS)), np.float32)
         raw[0, 0, bc.FIELD_INDEX["x"]] = 1.0
-        for state, index in ((0, 0), (10, 3), (16, 7), (119, 25), (470, 28),
-                             (478, 29), (4, 31), (35, 31), (999, 31), (-5, 31)):
+        for state, index in ((0, 0), (10, 3), (16, 7), (28, 11), (119, 25),
+                             (470, 28), (478, 29), (4, 31), (35, 31),
+                             (999, 31), (-5, 31)):
             raw[0, 0, bc.FIELD_INDEX["action_state"]] = state
             obs = bc.obs_from_raw(raw)[0]
             self.assertEqual(int(np.argmax(obs[14:46])), index, state)

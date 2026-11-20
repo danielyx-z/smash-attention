@@ -141,7 +141,7 @@ class TestLayout(unittest.TestCase):
         self.assertEqual(gym_obs.OBS_SIZE, 112)
         self.assertEqual(len(gym_obs.FEATURE_NAMES), 112)
         self.assertEqual(gym_obs.FEATURE_NAMES[0], "p1_x")
-        self.assertEqual(gym_obs.FEATURE_NAMES[-1], "p2_is_down")
+        self.assertEqual(gym_obs.FEATURE_NAMES[-1], "p2_is_guard")
         self.assertEqual(len(gym_obs.FAMILY_FLAGS), 6)
         self.assertEqual(gym_obs.ACTION_ONEHOT_SIZE, 32)
         self.assertEqual(len(gym_obs.CURATED_ACTION_STATES), 31)
@@ -291,7 +291,7 @@ class TestObservation(unittest.TestCase):
             0, x=100.0, y=-50.0, vx=25.0, vy=-10.0, damage=42.0, facing=-1.0,
             on_ground=0, is_actionable=1, jumps_left=1, action_frame=30.0,
             shield=1, dist_to_blast=60.0, hitstun=7, is_on_rebirth=1,
-            action_state=10, dx=40.0, dy=30.0, facing_rel=-1)
+            action_state=28, dx=40.0, dy=30.0, facing_rel=-1)
         self.fix.set_fighter(1, x=-20.0, action_state=999, dx=-40.0, dy=-30.0,
                              facing_rel=0)
         s = self._snapshot()
@@ -302,10 +302,10 @@ class TestObservation(unittest.TestCase):
                     1.0, 30.0, 1.0, 60.0, 0.0, 1.0]   # hitstun derived: GUARD is not
         np.testing.assert_allclose(obs[:14], expected)
 
-        # GUARD (id 10) is curated index 3
+        # GUARD (id 28) is curated index 11
         p1_oh = obs[14:46]
         self.assertEqual(p1_oh.sum(), 1.0)
-        self.assertEqual(int(p1_oh.argmax()), 3)
+        self.assertEqual(int(p1_oh.argmax()), 11)
         # dx, dy, distance=50, facing_rel
         np.testing.assert_allclose(obs[46:50], [40.0, 30.0, 50.0, -1.0])
 
@@ -315,7 +315,8 @@ class TestObservation(unittest.TestCase):
         self.assertEqual(int(p2_oh.argmax()), 31)
         np.testing.assert_allclose(obs[102:106], [-40.0, -30.0, 50.0, 0.0])
         # GUARD is no family
-        np.testing.assert_allclose(obs[50:56], np.zeros(6, dtype=np.float32))
+        np.testing.assert_allclose(obs[50:56],
+                                   [0, 0, 0, 0, 0, 1])    # is_guard only
         np.testing.assert_allclose(obs[106:112], np.zeros(6, dtype=np.float32))
 
     def test_normalized_divisors(self):
@@ -360,8 +361,8 @@ class TestObservation(unittest.TestCase):
                  476: "is_special", 478: "is_special",
                  16: "is_helpless", 470: "is_ko_rebirth",
                  181: "is_ko_rebirth", 182: "is_ko_rebirth",
-                 54: "is_damage", 62: "is_damage",
-                 505: "is_down", 511: "is_down"}
+                 71: "is_damage", 75: "is_damage",
+                 27: "is_guard", 28: "is_guard", 29: "is_guard"}
         names = list(gym_obs.FAMILY_FLAG_NAMES)
         for state, name in cases.items():
             f = {"x": 1.0, "action_state": state, "raw_flags": 1}
@@ -369,21 +370,28 @@ class TestObservation(unittest.TestCase):
             flags = obs[gym_obs.SLICES["p1_family"]]
             self.assertEqual(float(flags[names.index(name)]), 1.0, state)
             self.assertEqual(float(flags.sum()), 1.0, state)
-        # curated but not a family: no flag
-        for state in (0, 3, 10, 22, 72):
+        # curated but not a family: 10 is jump-squat, 54 the aerial attack
+        for state in (0, 3, 10, 22, 54, 505):
             f = {"x": 1.0, "action_state": state, "raw_flags": 1}
             obs = gym_obs.build_observation([f, {}])
             self.assertEqual(float(obs[gym_obs.SLICES["p1_family"]].sum()), 0.0)
 
-    def test_hitstun_comes_from_the_status_not_the_raw_field(self):
-        pos = [n for n, _d in gym_obs.SCALAR_FIELDS].index("hitstun")
-        for state, want in ((54, 1.0), (62, 1.0), (505, 1.0), (478, 0.0),
-                            (476, 0.0), (119, 0.0), (0, 0.0)):
-            # the raw field is wrong on purpose: up-B (478) used to read 1
+    def test_hitstun_and_shield_come_from_the_status_not_the_raw_field(self):
+        hs = [n for n, _d in gym_obs.SCALAR_FIELDS].index("hitstun")
+        sh = [n for n, _d in gym_obs.SCALAR_FIELDS].index("shield")
+        for state, want in ((71, 1.0), (75, 1.0), (54, 0.0), (478, 0.0),
+                            (505, 0.0), (119, 0.0), (0, 0.0)):
+            # the raw field is wrong on purpose (old reader flagged these)
             f = {"x": 1.0, "action_state": state, "hitstun": 1 - int(want),
                  "raw_flags": 1}
             obs = gym_obs.build_observation([f, {}])
-            self.assertEqual(float(obs[pos]), want, state)
+            self.assertEqual(float(obs[hs]), want, state)
+        for state, want in ((27, 1.0), (28, 1.0), (29, 0.0), (10, 0.0)):
+            # state 10 is JUMP-SQUAT: the old reader set shield=1 there
+            f = {"x": 1.0, "action_state": state, "shield": 1 - int(want),
+                 "raw_flags": 1}
+            obs = gym_obs.build_observation([f, {}])
+            self.assertEqual(float(obs[sh]), want, state)
 
     def test_nonfinite_fields_are_sanitized(self):
         f = {"x": float("nan"), "y": float("inf"), "raw_flags": 1}

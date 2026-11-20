@@ -36,7 +36,7 @@ rl-eval = "rl.bc.gym_eval:main"
 rl-probe = "rl.memory.probe:main"
 
 [tool.setuptools.package-data]
-"rl.memory" = ["memmap.json"]
+"rl.memory" = ["memmap.json", "status_ids_verified.json"]
 "rl.extra" = ["extra_map.json"]
 
 [tool.setuptools.package-dir]

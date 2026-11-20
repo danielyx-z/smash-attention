@@ -77,7 +77,12 @@ BUTTON_INDEX = {name: i for i, name in enumerate(BUTTONS)}
 # spurious jump (A's check_button table has no 0x8000 entry).  The reliable
 # shield signal is the status kind, so the dataset builder relabels those
 # target frames ZL=1/X=0 (see BCConfig.shield_from_status).
-GUARD_STATES = (8, 9, 10)          # GUARD_START, GUARD_ON, GUARD_OFF
+GUARD_STATES = (27, 28)            # GUARD_ON, GUARD (held); 29 = GUARD_OFF
+GUARD_OFF_STATE = 29
+# In CPU recordings the held shield is the 0x8 bit of the mask (decoded as
+# "Y"); 97-99 % of 27/28 frames carry 0x8008.  0x8004 (the old "spurious X")
+# is the JUMP-SQUAT mask (state 10), a real jump press.
+CPU_SHIELD_BUTTON = "Y"
 SHIELD_BUTTON = BUTTON_INDEX["ZL"]
 # Raw ControlModule bit positions, evidence in memmap.json / schema.py:
 #   A=0x1 B=0x2 X=0x4 Y=0x8 L=0x20 R=0x400 ZL=0x1000 ZR=0x2000
@@ -127,17 +132,17 @@ _LOCAL_RELATIVE = (
 )
 # same curated order as gym_obs.CURATED_ACTION_STATES (31 states + OTHER)
 _LOCAL_CURATED_STATES = (
-    0, 3, 7, 10, 11, 12, 14, 16, 22, 24, 28, 32, 33, 34, 39, 41, 43, 44, 53,
-    54, 72, 73, 79, 117, 118, 119, 181, 182, 470, 478, 505,
+    0, 3, 7, 10, 11, 12, 14, 16, 22, 24, 27, 28, 32, 33, 34, 39, 41, 43, 44,
+    54, 71, 72, 73, 117, 118, 119, 181, 182, 470, 478, 505,
 )
 # same families as gym_obs.FAMILY_FLAGS (real status ids, rl.memory.status_kinds)
 _LOCAL_FAMILIES = (
-    ("is_ledge", (117, 118, 119, 120, 121, 122, 123)),
+    ("is_ledge", (117, 118, 119, 120, 121, 122, 123, 124)),
     ("is_special", (476, 477, 478, 479)),
     ("is_helpless", (16,)),
     ("is_ko_rebirth", (470, 181, 182)),
-    ("is_damage", (54, 55, 56, 57, 58, 59, 60, 61, 62)),
-    ("is_down", (505, 506, 507, 508, 509, 510, 511)),
+    ("is_damage", (71, 72, 73, 74, 75)),
+    ("is_guard", (27, 28, 29)),
 )
 try:  # Agent C's module is the source of truth when it is importable.
     from rl.env import gym_obs as _gym_obs  # type: ignore
@@ -168,8 +173,9 @@ del _i, _state
 
 _ONEHOT_SLICE = slice(14, 14 + ACTION_ONEHOT_SIZE)
 _HITSTUN_POS = [n for n, _d in SCALAR_FIELDS].index("hitstun")
-_HITSTUN_IDS = np.array(sorted(set(range(54, 63)) | set(range(505, 512))),
-                        dtype=np.int64)
+_SHIELD_POS = [n for n, _d in SCALAR_FIELDS].index("shield")
+_HITSTUN_IDS = np.array([71, 72, 73, 74, 75], dtype=np.int64)
+_GUARD_HELD_IDS = np.array([27, 28], dtype=np.int64)
 _DX = 46
 _DY = 47
 _DIST = 48
@@ -366,6 +372,7 @@ def obs_from_raw(raw, normalize: bool = False,
         # recomputed from the status id: old recordings flagged 476-479 (the
         # specials) as hitstun
         b[..., _HITSTUN_POS] = np.isin(states, _HITSTUN_IDS).astype(np.float32)
+        b[..., _SHIELD_POS] = np.isin(states, _GUARD_HELD_IDS).astype(np.float32)
         idx = np.full(states.shape, OTHER_INDEX, dtype=np.int64)
         in_range = (states >= 0) & (states < len(_STATE_LOOKUP))
         idx[in_range] = _STATE_LOOKUP[states[in_range]]
@@ -647,7 +654,7 @@ class EpisodeData:
             self.acts = self._actions()
 
     def guard_mask(self) -> np.ndarray:
-        """True on frames whose status is the GUARD family (8/9/10)."""
+        """True on frames whose status is a held shield (27/28)."""
         raw = self.raw[:, self.player, FIELD_INDEX["action_state"]]
         ok = np.isfinite(raw) & (np.abs(raw) <= OBS_LIMIT)
         states = np.where(ok, raw, -1).astype(np.int64)
@@ -658,12 +665,17 @@ class EpisodeData:
         buttons = decode_buttons(self.buttons_raw[:, p])
         if self.shield_from_status:
             guard = self.guard_mask()
+            # The first frames of GUARD_OFF still carry the shield bit.
+            raw_state = self.raw[:, self.player, FIELD_INDEX["action_state"]]
+            y = BUTTON_INDEX[CPU_SHIELD_BUTTON]
+            guard = guard | ((raw_state == GUARD_OFF_STATE)
+                             & (buttons[:, y] > 0.5))
             if np.any(guard):
-                # The CPU mask's 0x8004 carries a spurious X (jump) on guard
-                # frames; deploy the shield as ZL (the virtual pad maps ZL to
-                # the Pro Controller ZL).  The raw mask is not modified.
+                # The CPU's shield is the 0x8 bit (decoded as Y); deploy it
+                # as ZL (the virtual pad maps ZL to the Pro Controller ZL).
+                # Jump-squat frames (X) are NOT guard and stay untouched.
                 buttons[guard, SHIELD_BUTTON] = 1.0
-                buttons[guard, BUTTON_INDEX["X"]] = 0.0
+                buttons[guard, y] = 0.0
         return {
             "buttons": buttons,
             "stick": self.stick[:, p].astype(np.float32),
@@ -1184,13 +1196,13 @@ def shield_label_stats(episodes: list[EpisodeData]) -> dict:
 
     ``frames`` is the number of decisions whose status is 8/9/10 (these become
     ZL=1/X=0 training targets when ``shield_from_status`` is on);
-    ``spurious_x_cleared`` counts how many of them had the CPU mask's 0x4 (X)
+    ``spurious_y_cleared`` counts how many of them had the CPU mask's 0x4 (X)
     bit set in the raw record.
     """
     by_state = {str(s): 0 for s in GUARD_STATES}
     total = 0
     x_cleared = 0
-    x_bit = BUTTON_BITS[BUTTON_INDEX["X"]]
+    x_bit = BUTTON_BITS[BUTTON_INDEX[CPU_SHIELD_BUTTON]]
     for ep in episodes:
         raw = ep.raw[:, ep.player, FIELD_INDEX["action_state"]]
         ok = np.isfinite(raw) & (np.abs(raw) <= OBS_LIMIT)
@@ -1203,7 +1215,7 @@ def shield_label_stats(episodes: list[EpisodeData]) -> dict:
             masks = ep.buttons_raw[guard, ep.player]
             x_cleared += int(np.count_nonzero((masks & x_bit) != 0))
     return {"frames": total, "by_state": by_state,
-            "spurious_x_cleared": x_cleared}
+            "spurious_y_cleared": x_cleared}
 
 
 def merge_shield_stats(stats: list[dict]) -> dict:
@@ -1214,7 +1226,7 @@ def merge_shield_stats(stats: list[dict]) -> dict:
     return {
         "frames": sum(int(s["frames"]) for s in stats),
         "by_state": by_state,
-        "spurious_x_cleared": sum(int(s["spurious_x_cleared"]) for s in stats),
+        "spurious_y_cleared": sum(int(s["spurious_y_cleared"]) for s in stats),
     }
 
 
@@ -2264,7 +2276,7 @@ def _train(data_dir: str, out: str, cfg: BCConfig | None = None,
         log(f"[bc] shield-from-status: {shield_labels['total']['frames']} "
             f"guard decisions relabeled ZL=1/X=0 "
             f"(train {shield_labels['train']['frames']}, "
-            f"{shield_labels['train']['spurious_x_cleared']} spurious X)")
+            f"{shield_labels['train']['spurious_y_cleared']} spurious X)")
     else:
         log(f"[bc] shield-from-status OFF: {shield_labels['total']['frames']} "
             "guard decisions keep their raw mask")

@@ -2135,3 +2135,44 @@ Control run (good model, lr~0, 40 CPU7 episodes): 0.38 deaths/episode,
 damage diff +1.6 (sd 40), so 10-episode evals cannot rank checkpoints.  Deaths:
 14/15 were falls to the bottom blast zone at a median 43 % damage (8 of 15 with
 no hit in the last 60 decisions), 1 side blast.
+
+### Correction: ids verified live (status scenario suite)
+
+My first fix of the status ids was itself partly wrong (it still trusted the
+schema for 10, 54-62 and 505-511).  `rl.scripts.status_scenarios` now drives P1
+through ~40 scripted situations (ground moves, aerials, specials, ledge
+options, Up-B, KO) and checks the ids against behaviour; 29 checks pass and
+the observed table is stored in `rl/memory/status_ids_verified.json`.
+
+| id | verified meaning |
+|---|---|
+| 0 / 3 / 4 / 5 | wait / dash / run / run-brake |
+| 10 / 11 / 12 | **jump-squat** / jump / midair jump (10 was believed to be guard) |
+| 14 / 15 / 16 | fall / fall after midair jump / **helpless fall after Up-B** |
+| 22 / 24 / 25 | landing / aerial landing / helpless landing |
+| 27 / 28 / 29 | **guard raise / hold / release** (ZL) |
+| 54 | **aerial attack** (all aerials; was believed to be damage) |
+| 476 / 477 / 478 / 479 | special N / S / Hi (Up-B) / Lw, ground and air |
+| 71-75 | **damage reactions** (73 and 72 in 94 % of hits; 73 was believed to be ledge) |
+| 117-119 | ledge catch / catch / hang at x=+-83.6, y=-27.44 |
+| 120 / 122 / 123 / 124 | ledge attack / roll / getup+jump / ledge-jump rise |
+| 181 -> 470 -> 182 | KO entry (transient) -> KO flight -> respawn platform |
+| 505-511 | DK special sub-states (fighter-specific; not "down") |
+
+Consequences fixed on top of the earlier ones:
+
+* the reader's `shield` field was 1 on status 10 (jump-squat) and 0 while
+  actually shielding; it now uses 27/28, and the observation recomputes both
+  `shield` and `hitstun` from the status id so old recordings agree;
+* CPU recordings carry the shield as the 0x8 mask bit (0x8008 on 97-99 % of
+  27/28 frames); 0x8004 is the JUMP-SQUAT mask.  The BC `shield_from_status`
+  relabel used 8/9/10 and cleared X, i.e. it rewrote real jump presses as
+  shields and left real guard frames with a stray Y.  It now relabels 27/28
+  (and 29 while the bit is set) to ZL=1, Y=0;
+* hitstun used 54-62/476-479/505-511, so it was 1 during aerials, specials
+  and DK's special sub-states, and 0 during real damage.
+
+`test_status_ids.py` fails if the checks regress, if a code constant was never
+observed live, or if the reader, observation, BC fallback tables and reward
+disagree.  `verify_live_state.py` still uses the old name-based sets and is
+superseded by the scenario suite.

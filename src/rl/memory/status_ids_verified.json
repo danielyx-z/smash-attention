@@ -1,0 +1,1035 @@
+{
+ "build": "13.0.4",
+ "ledge": [
+  83.6,
+  -27.44
+ ],
+ "checks": [
+  {
+   "name": "upb_jump_toward: Up-B id == SPECIAL_HI",
+   "ok": true,
+   "detail": {
+    "478": 50
+   }
+  },
+  {
+   "name": "upb_only_toward: Up-B id == SPECIAL_HI",
+   "ok": true,
+   "detail": {
+    "478": 72,
+    "72": 18
+   }
+  },
+  {
+   "name": "helpless fall id == HELPLESS_FALL",
+   "ok": true,
+   "detail": {
+    "16": 6
+   }
+  },
+  {
+   "name": "ledge hang id == LEDGE_HANG",
+   "ok": true,
+   "detail": {
+    "119": 78
+   }
+  },
+  {
+   "name": "ids near the ledge are LEDGE_KINDS",
+   "ok": true,
+   "detail": {
+    "118": 2,
+    "119": 78
+   }
+  },
+  {
+   "name": "ledge_getup: leaves through a ledge-exit id (120-123)",
+   "ok": true,
+   "detail": [
+    123,
+    123,
+    124,
+    14,
+    22,
+    123,
+    123,
+    124
+   ]
+  },
+  {
+   "name": "ledge_roll: leaves through a ledge-exit id (120-123)",
+   "ok": true,
+   "detail": [
+    122,
+    0,
+    122,
+    0,
+    122,
+    0
+   ]
+  },
+  {
+   "name": "ledge_attack: leaves through a ledge-exit id (120-123)",
+   "ok": true,
+   "detail": [
+    120,
+    120,
+    0,
+    120,
+    120,
+    0,
+    120,
+    120
+   ]
+  },
+  {
+   "name": "ledge_jump: leaves through a ledge-exit id (120-123)",
+   "ok": true,
+   "detail": [
+    123,
+    123,
+    124,
+    14,
+    22,
+    123,
+    123,
+    124
+   ]
+  },
+  {
+   "name": "ledge_drop: falls (state 14) after the drop",
+   "ok": true,
+   "detail": [
+    14,
+    14,
+    181,
+    470,
+    14,
+    14,
+    470
+   ]
+  },
+  {
+   "name": "KO: 470 appears; every 181 is followed by 470",
+   "ok": true,
+   "detail": [
+    182,
+    182,
+    14,
+    14,
+    181,
+    470,
+    182,
+    182
+   ]
+  },
+  {
+   "name": "rebirth platform id == REBIRTH_PLATFORM",
+   "ok": true,
+   "detail": {
+    "182": 80
+   }
+  },
+  {
+   "name": "shield ids are 27 then 28",
+   "ok": true,
+   "detail": [
+    27,
+    28,
+    27,
+    28,
+    30,
+    28,
+    30,
+    28,
+    30,
+    27,
+    28
+   ]
+  },
+  {
+   "name": "release enters 29",
+   "ok": true,
+   "detail": [
+    0,
+    27,
+    28,
+    29,
+    0,
+    27,
+    28,
+    30,
+    28,
+    30,
+    28,
+    30,
+    30,
+    29,
+    29,
+    27,
+    28,
+    29
+   ]
+  },
+  {
+   "name": "jump press: JUMP_SQUAT (10) always followed by JUMP (11)",
+   "ok": true,
+   "detail": [
+    123,
+    123,
+    124,
+    14,
+    22,
+    10,
+    11,
+    11,
+    22,
+    0
+   ]
+  },
+  {
+   "name": "nair: aerial attack id == ATTACK_AIR (54)",
+   "ok": true,
+   "detail": [
+    54
+   ]
+  },
+  {
+   "name": "fair_r: aerial attack id == ATTACK_AIR (54)",
+   "ok": true,
+   "detail": [
+    54
+   ]
+  },
+  {
+   "name": "bair_l: aerial attack id == ATTACK_AIR (54)",
+   "ok": true,
+   "detail": [
+    54
+   ]
+  },
+  {
+   "name": "uair: aerial attack id == ATTACK_AIR (54)",
+   "ok": true,
+   "detail": [
+    54
+   ]
+  },
+  {
+   "name": "dair: aerial attack id == ATTACK_AIR (54)",
+   "ok": true,
+   "detail": [
+    54
+   ]
+  },
+  {
+   "name": "spec_n: special id in 476-479",
+   "ok": true,
+   "detail": [
+    476,
+    508
+   ]
+  },
+  {
+   "name": "spec_s: special id in 476-479",
+   "ok": true,
+   "detail": [
+    477
+   ]
+  },
+  {
+   "name": "spec_hi: special id in 476-479",
+   "ok": true,
+   "detail": [
+    478
+   ]
+  },
+  {
+   "name": "spec_lw: special id in 476-479",
+   "ok": true,
+   "detail": [
+    479
+   ]
+  },
+  {
+   "name": "air_spec_n: special id in 476-479",
+   "ok": true,
+   "detail": [
+    476,
+    508
+   ]
+  },
+  {
+   "name": "air_spec_s: special id in 476-479",
+   "ok": true,
+   "detail": [
+    477
+   ]
+  },
+  {
+   "name": "air_spec_hi: special id in 476-479",
+   "ok": true,
+   "detail": [
+    478
+   ]
+  },
+  {
+   "name": "air_spec_lw: special id in 476-479",
+   "ok": true,
+   "detail": [
+    479
+   ]
+  },
+  {
+   "name": "states entered after taking damage are DAMAGE_KINDS (>=90 %)",
+   "ok": true,
+   "detail": {
+    "fraction": 0.944,
+    "top": [
+     [
+      73,
+      2431
+     ],
+     [
+      72,
+      2350
+     ],
+     [
+      71,
+      500
+     ],
+     [
+      74,
+      134
+     ],
+     [
+      67,
+      126
+     ],
+     [
+      135,
+      62
+     ]
+    ]
+   }
+  }
+ ],
+ "ids": {
+  "0": {
+   "frames": 1832,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "air_spec_lw/after",
+    "airdodge/after",
+    "bair_l/after",
+    "dair/after",
+    "dash/idle",
+    "dsmash/after",
+    "dsmash/idle",
+    "dtilt/after",
+    "dtilt/idle",
+    "fair_r/after",
+    "fall_free/after",
+    "fsmash/after"
+   ]
+  },
+  "1": {
+   "frames": 72,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "run_then_stop/run",
+    "walk/walk"
+   ]
+  },
+  "3": {
+   "frames": 8,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dash/dash"
+   ]
+  },
+  "4": {
+   "frames": 119,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dash/dash",
+    "turn/go",
+    "upb_only_toward/after"
+   ]
+  },
+  "6": {
+   "frames": 6,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "walk/walk"
+   ]
+  },
+  "7": {
+   "frames": 49,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "turn/after",
+    "turn/go",
+    "turn/idle",
+    "turn/turnaround",
+    "upb_jump_toward/after",
+    "upb_only_toward/after"
+   ]
+  },
+  "10": {
+   "frames": 54,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "air_spec_hi/jump",
+    "air_spec_lw/jump",
+    "air_spec_n/jump",
+    "air_spec_n/rise",
+    "air_spec_s/jump",
+    "airdodge/jump",
+    "bair_l/jump",
+    "dair/jump",
+    "fair_r/jump",
+    "fall_free/jump",
+    "jump/jump",
+    "jump_fwd/jump_fwd"
+   ]
+  },
+  "11": {
+   "frames": 668,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": 42.1,
+   "scenarios": [
+    "air_spec_hi/jump",
+    "air_spec_hi/rise",
+    "air_spec_lw/jump",
+    "air_spec_lw/rise",
+    "air_spec_n/rise",
+    "air_spec_s/jump",
+    "air_spec_s/rise",
+    "airdodge/jump",
+    "airdodge/rise",
+    "bair_l/jump",
+    "bair_l/rise",
+    "dair/jump"
+   ]
+  },
+  "12": {
+   "frames": 154,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": 51.3,
+   "scenarios": [
+    "air_spec_lw/jump",
+    "air_spec_lw/rise",
+    "midair_jump/after",
+    "midair_jump/midair_jump",
+    "upb_helpless/jump",
+    "upb_helpless/rise",
+    "upb_jump_toward/jump",
+    "upb_jump_toward/rise"
+   ]
+  },
+  "14": {
+   "frames": 696,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": -86.5,
+   "scenarios": [
+    "dash/after",
+    "dash/dash",
+    "jump/after",
+    "ko_sequence/fall",
+    "ko_sequence/ko",
+    "ledge_drop/after",
+    "ledge_drop/drop",
+    "ledge_getup/after",
+    "ledge_jump/after",
+    "run_then_stop/after",
+    "run_then_stop/run",
+    "turn/after"
+   ]
+  },
+  "15": {
+   "frames": 23,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": -97.8,
+   "scenarios": [
+    "midair_jump/after"
+   ]
+  },
+  "16": {
+   "frames": 36,
+   "ground": 0.0,
+   "actionable": 0.0,
+   "mean_vy": -97.8,
+   "scenarios": [
+    "upb_helpless/after",
+    "upb_jump_toward/after",
+    "upb_only_toward/after"
+   ]
+  },
+  "21": {
+   "frames": 21,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dtilt/after"
+   ]
+  },
+  "22": {
+   "frames": 193,
+   "ground": 1.0,
+   "actionable": 0.69,
+   "mean_vy": -1.7,
+   "scenarios": [
+    "air_spec_lw/after",
+    "airdodge/after",
+    "fall_free/after",
+    "jump/after",
+    "jump_fwd/after",
+    "ko_sequence/ko",
+    "ledge_getup/after",
+    "ledge_jump/after",
+    "run_then_stop/run",
+    "spec_n/idle",
+    "turn/turnaround"
+   ]
+  },
+  "23": {
+   "frames": 18,
+   "ground": 1.0,
+   "actionable": 0.89,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "fall_free/after",
+    "jump_fwd/after"
+   ]
+  },
+  "24": {
+   "frames": 188,
+   "ground": 1.0,
+   "actionable": 0.48,
+   "mean_vy": -1.0,
+   "scenarios": [
+    "bair_l/after",
+    "dair/after",
+    "fair_r/after",
+    "nair/after",
+    "uair/after"
+   ]
+  },
+  "25": {
+   "frames": 80,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": -2.5,
+   "scenarios": [
+    "upb_jump_toward/after",
+    "upb_only_toward/after"
+   ]
+  },
+  "27": {
+   "frames": 15,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "grab/grab",
+    "shield/shield"
+   ]
+  },
+  "28": {
+   "frames": 57,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "shield/shield"
+   ]
+  },
+  "29": {
+   "frames": 97,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "grab/after",
+    "shield/after",
+    "shield/idle"
+   ]
+  },
+  "30": {
+   "frames": 15,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "shield/after",
+    "shield/shield"
+   ]
+  },
+  "34": {
+   "frames": 30,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": -77.0,
+   "scenarios": [
+    "airdodge/after",
+    "airdodge/airdodge"
+   ]
+  },
+  "39": {
+   "frames": 51,
+   "ground": 1.0,
+   "actionable": 0.29,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "jab/after",
+    "jab/jab"
+   ]
+  },
+  "42": {
+   "frames": 60,
+   "ground": 1.0,
+   "actionable": 0.15,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "ftilt/after",
+    "ftilt/ftilt"
+   ]
+  },
+  "43": {
+   "frames": 72,
+   "ground": 1.0,
+   "actionable": 0.21,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "utilt/after",
+    "utilt/utilt"
+   ]
+  },
+  "44": {
+   "frames": 48,
+   "ground": 1.0,
+   "actionable": 0.25,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dtilt/after",
+    "dtilt/dtilt"
+   ]
+  },
+  "45": {
+   "frames": 21,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "fsmash/after",
+    "fsmash/fsmash"
+   ]
+  },
+  "47": {
+   "frames": 68,
+   "ground": 1.0,
+   "actionable": 0.12,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "fsmash/after"
+   ]
+  },
+  "48": {
+   "frames": 3,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dsmash/dsmash"
+   ]
+  },
+  "49": {
+   "frames": 3,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dsmash/dsmash"
+   ]
+  },
+  "50": {
+   "frames": 90,
+   "ground": 1.0,
+   "actionable": 0.13,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dsmash/after"
+   ]
+  },
+  "51": {
+   "frames": 9,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "usmash/after",
+    "usmash/usmash"
+   ]
+  },
+  "53": {
+   "frames": 79,
+   "ground": 1.0,
+   "actionable": 0.19,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "usmash/after"
+   ]
+  },
+  "54": {
+   "frames": 144,
+   "ground": 0.0,
+   "actionable": 0.0,
+   "mean_vy": -78.2,
+   "scenarios": [
+    "bair_l/aerial_left",
+    "bair_l/after",
+    "dair/after",
+    "dair/dair",
+    "fair_r/aerial_right",
+    "fair_r/after",
+    "nair/after",
+    "nair/nair",
+    "uair/after",
+    "uair/uair"
+   ]
+  },
+  "71": {
+   "frames": 39,
+   "ground": 1.0,
+   "actionable": 0.28,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "ko_sequence/fall",
+    "ko_sequence/platform",
+    "spec_hi/after"
+   ]
+  },
+  "72": {
+   "frames": 96,
+   "ground": 0.2,
+   "actionable": 0.02,
+   "mean_vy": 15.1,
+   "scenarios": [
+    "air_spec_lw/after",
+    "ko_sequence/fall",
+    "ko_sequence/ko",
+    "spec_n/after",
+    "upb_only_toward/after"
+   ]
+  },
+  "73": {
+   "frames": 61,
+   "ground": 0.1,
+   "actionable": 1.0,
+   "mean_vy": -10.5,
+   "scenarios": [
+    "air_spec_lw/after",
+    "ko_sequence/ko",
+    "upb_only_toward/after"
+   ]
+  },
+  "79": {
+   "frames": 6,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": -86.3,
+   "scenarios": [
+    "ko_sequence/ko",
+    "upb_only_toward/after"
+   ]
+  },
+  "80": {
+   "frames": 26,
+   "ground": 1.0,
+   "actionable": 1.0,
+   "mean_vy": -2.7,
+   "scenarios": [
+    "ko_sequence/ko",
+    "upb_only_toward/after"
+   ]
+  },
+  "83": {
+   "frames": 110,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "ko_sequence/ko"
+   ]
+  },
+  "87": {
+   "frames": 14,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "ko_sequence/ko"
+   ]
+  },
+  "88": {
+   "frames": 4,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "upb_only_toward/after"
+   ]
+  },
+  "118": {
+   "frames": 16,
+   "ground": 0.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "ledge_attack/hang",
+    "ledge_drop/hang",
+    "ledge_getup/hang",
+    "ledge_jump/hang",
+    "ledge_roll/hang",
+    "ledge_wait/hang"
+   ]
+  },
+  "119": {
+   "frames": 782,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "dash/idle",
+    "jump/idle",
+    "ledge_attack/hang",
+    "ledge_drop/hang",
+    "ledge_getup/hang",
+    "ledge_jump/hang",
+    "ledge_roll/hang",
+    "ledge_wait/after",
+    "ledge_wait/hang",
+    "ledge_wait/wait",
+    "run_then_stop/idle",
+    "turn/idle"
+   ]
+  },
+  "120": {
+   "frames": 98,
+   "ground": 0.79,
+   "actionable": 0.06,
+   "mean_vy": 25.1,
+   "scenarios": [
+    "ledge_attack/after",
+    "ledge_attack/attack"
+   ]
+  },
+  "122": {
+   "frames": 81,
+   "ground": 0.7,
+   "actionable": 0.17,
+   "mean_vy": 31.8,
+   "scenarios": [
+    "ledge_roll/after",
+    "ledge_roll/roll_in"
+   ]
+  },
+  "123": {
+   "frames": 42,
+   "ground": 0.0,
+   "actionable": 0.0,
+   "mean_vy": 133.8,
+   "scenarios": [
+    "jump/after",
+    "jump/jump",
+    "ledge_getup/after",
+    "ledge_getup/getup",
+    "ledge_jump/after",
+    "ledge_jump/jump"
+   ]
+  },
+  "124": {
+   "frames": 102,
+   "ground": 0.0,
+   "actionable": 1.0,
+   "mean_vy": 75.7,
+   "scenarios": [
+    "jump/after",
+    "ledge_getup/after",
+    "ledge_jump/after"
+   ]
+  },
+  "181": {
+   "frames": 5,
+   "ground": 0.0,
+   "actionable": 0.0,
+   "mean_vy": -109.5,
+   "scenarios": [
+    "ko_sequence/ko",
+    "ledge_drop/after",
+    "run_then_stop/after"
+   ]
+  },
+  "182": {
+   "frames": 87,
+   "ground": 0.0,
+   "actionable": 0.25,
+   "mean_vy": 339.0,
+   "scenarios": [
+    "ko_sequence/ko",
+    "ko_sequence/platform",
+    "run_then_stop/idle",
+    "turn/idle",
+    "upb_helpless/after"
+   ]
+  },
+  "470": {
+   "frames": 284,
+   "ground": 0.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "ko_sequence/ko",
+    "ledge_drop/after",
+    "run_then_stop/after",
+    "upb_helpless/after",
+    "upb_jump_toward/after"
+   ]
+  },
+  "476": {
+   "frames": 15,
+   "ground": 0.47,
+   "actionable": 0.0,
+   "mean_vy": -28.1,
+   "scenarios": [
+    "air_spec_n/after",
+    "air_spec_n/air_spec_n",
+    "spec_n/after",
+    "spec_n/spec_n"
+   ]
+  },
+  "477": {
+   "frames": 200,
+   "ground": 0.76,
+   "actionable": 0.07,
+   "mean_vy": -14.5,
+   "scenarios": [
+    "air_spec_s/after",
+    "air_spec_s/air_spec_s",
+    "spec_s/after",
+    "spec_s/spec_s"
+   ]
+  },
+  "478": {
+   "frames": 491,
+   "ground": 0.28,
+   "actionable": 0.02,
+   "mean_vy": 16.3,
+   "scenarios": [
+    "air_spec_hi/after",
+    "air_spec_hi/air_spec_hi",
+    "spec_hi/after",
+    "spec_hi/idle",
+    "spec_hi/spec_hi",
+    "upb_helpless/after",
+    "upb_helpless/upb",
+    "upb_jump_toward/after",
+    "upb_jump_toward/upb",
+    "upb_only_toward/after",
+    "upb_only_toward/upb"
+   ]
+  },
+  "479": {
+   "frames": 55,
+   "ground": 0.16,
+   "actionable": 0.04,
+   "mean_vy": -80.0,
+   "scenarios": [
+    "air_spec_lw/after",
+    "air_spec_lw/air_spec_lw",
+    "spec_lw/after",
+    "spec_lw/spec_lw"
+   ]
+  },
+  "505": {
+   "frames": 160,
+   "ground": 0.96,
+   "actionable": 0.32,
+   "mean_vy": -3.2,
+   "scenarios": [
+    "air_spec_n/after",
+    "spec_n/after"
+   ]
+  },
+  "506": {
+   "frames": 2,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "air_spec_n/jump"
+   ]
+  },
+  "508": {
+   "frames": 70,
+   "ground": 0.73,
+   "actionable": 0.21,
+   "mean_vy": -13.8,
+   "scenarios": [
+    "air_spec_n/after",
+    "air_spec_n/air_spec_n",
+    "spec_n/after",
+    "spec_n/spec_n"
+   ]
+  },
+  "509": {
+   "frames": 10,
+   "ground": 1.0,
+   "actionable": 0.6,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "air_spec_n/after",
+    "spec_n/after",
+    "spec_n/idle"
+   ]
+  },
+  "510": {
+   "frames": 42,
+   "ground": 1.0,
+   "actionable": 0.0,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "spec_lw/after"
+   ]
+  },
+  "511": {
+   "frames": 54,
+   "ground": 1.0,
+   "actionable": 0.61,
+   "mean_vy": 0.0,
+   "scenarios": [
+    "spec_lw/after"
+   ]
+  }
+ }
+}

@@ -78,32 +78,32 @@ SCALAR_FIELDS: tuple[tuple[str, float], ...] = (
 #: table covered 39 % of recorded frames; this one covers 80 %.
 CURATED_ACTION_STATES: tuple[tuple[str, int], ...] = (
     ("WAIT", 0),
-    ("S3", 3),
+    ("DASH", 3),
     ("S7", 7),
-    ("GUARD", 10),
-    ("S11", 11),
-    ("S12", 12),
-    ("S14", 14),
+    ("JUMP_SQUAT", 10),
+    ("JUMP", 11),
+    ("JUMP_AERIAL", 12),
+    ("FALL", 14),
     ("HELPLESS_FALL", 16),
-    ("S22", 22),
-    ("S24", 24),
-    ("S28", 28),
+    ("LANDING", 22),
+    ("LANDING_AIR", 24),
+    ("GUARD_ON", 27),
+    ("GUARD", 28),
     ("S32", 32),
     ("S33", 33),
-    ("S34", 34),
-    ("S39", 39),
+    ("ESCAPE_AIR", 34),
+    ("ATTACK_JAB", 39),
     ("S41", 41),
     ("S43", 43),
     ("S44", 44),
-    ("S53", 53),
-    ("DAMAGE", 54),
-    ("S72", 72),
-    ("S73", 73),
-    ("S79", 79),
+    ("ATTACK_AIR", 54),
+    ("DAMAGE_71", 71),
+    ("DAMAGE_72", 72),
+    ("DAMAGE_73", 73),
     ("LEDGE_CATCH_MOVE", 117),
     ("LEDGE_CATCH", 118),
     ("LEDGE_HANG", 119),
-    ("REBIRTH_DESCENT", 181),
+    ("DEAD_ENTRY", 181),
     ("REBIRTH_PLATFORM", 182),
     ("KO", 470),
     ("SPECIAL_HI", 478),
@@ -115,11 +115,8 @@ OTHER_INDEX = ACTION_ONEHOT_SIZE - 1
 ACTION_STATE_ONEHOT: dict[int, int] = {
     state_id: index for index, (_name, state_id) in enumerate(CURATED_ACTION_STATES)
 }
-# Live evidence (Agent B): held shield is status 10 (GUARD); 8 GUARD_START and
-# 9 GUARD_ON are the same shield family and share the GUARD one-hot slot.
-for _alias in (8, 9):
-    ACTION_STATE_ONEHOT.setdefault(_alias, ACTION_STATE_ONEHOT[10])
-del _alias
+# (The old 8/9/10 "guard" aliases are gone: 10 is jump-squat; the shield is
+# 27 (raising) / 28 (held) / 29 (lowering).)
 
 assert len(CURATED_ACTION_STATES) == OTHER_INDEX, "curated list must fill 31 slots"
 
@@ -139,14 +136,15 @@ FAMILY_FLAGS: tuple[tuple[str, tuple[int, ...]], ...] = (
     ("is_ledge", tuple(sorted(status_kinds.LEDGE_KINDS))),       # 117-123
     ("is_special", tuple(sorted(status_kinds.SPECIAL_KINDS))),   # 476-479
     ("is_helpless", tuple(sorted(status_kinds.HELPLESS_KINDS))), # 16
-    ("is_ko_rebirth", (status_kinds.KO,
-                       *sorted(status_kinds.REBIRTH_KINDS))),    # 470, 181, 182
-    ("is_damage", tuple(sorted(status_kinds.DAMAGE_KINDS))),     # 54-62
-    ("is_down", tuple(sorted(status_kinds.DOWN_KINDS))),         # 505-511
+    ("is_ko_rebirth", (status_kinds.KO, status_kinds.DEAD_ENTRY,
+                       status_kinds.REBIRTH_PLATFORM)),          # 470, 181, 182
+    ("is_damage", tuple(sorted(status_kinds.DAMAGE_KINDS))),     # 71-75
+    ("is_guard", tuple(sorted(status_kinds.GUARD_KINDS))),       # 27-29
 )
 FAMILY_FLAG_NAMES: tuple[str, ...] = tuple(name for name, _ids in FAMILY_FLAGS)
 
 _HITSTUN_POS = [n for n, _d in SCALAR_FIELDS].index("hitstun")
+_SHIELD_POS = [n for n, _d in SCALAR_FIELDS].index("shield")
 PER_FIGHTER_SIZE = (len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE
                     + len(RELATIVE_FIELDS) + len(FAMILY_FLAGS))
 N_FIGHTERS = 2
@@ -255,12 +253,15 @@ def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray,
         pos += 1
 
     # `hitstun` is recomputed from the status id so recordings made with the
-    # old reader (which flagged 476-479, the specials) agree with live frames.
+    # old reader (which flagged the wrong ids) agree with live frames.
     try:
         _st = int(fighter.get("action_state", -1))
     except (TypeError, ValueError):
         _st = -1
     out[_HITSTUN_POS] = 1.0 if _st in status_kinds.HITSTUN_KINDS else 0.0
+    # `shield` is derived the same way: old recordings set it on status 10,
+    # which is jump-squat; the held shield is 27/28.
+    out[_SHIELD_POS] = 1.0 if _st in status_kinds.GUARD_HELD_KINDS else 0.0
 
     out[pos:pos + ACTION_ONEHOT_SIZE] = _action_onehot(fighter.get("action_state", -1))
     pos += ACTION_ONEHOT_SIZE
