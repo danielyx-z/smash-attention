@@ -2077,3 +2077,15 @@ network enough to change on-stage behavior.  The original drill checkpoint
 
 The CPU6 chunk was stopped before completion.  All `rl_drillA_*` checkpoints
 are deleted; only `rl_cpu7_drill_best.pt` and the BC anchor remain.
+
+### 50/50 transition split (training logs only)
+
+Four cycles of 3,600 drill transitions + 3,600 fight transitions:
+
+* drill recovery: 78%, 72%, 74%, 70%;
+* fight: 8 P1 deaths / 16 episodes, mean damage diff -3.0;
+* final fight phase: 1 death / 4, damage -3.0, KL to the good anchor 0.010.
+
+Recovery held, but the fight phases did not improve over the good checkpoint
+(2 deaths / 10, +31.7 damage).  No final eval was run; the training logs are
+enough to keep `rl_cpu7_drill_best.pt`.  All `rl_split_*` checkpoints deleted.
