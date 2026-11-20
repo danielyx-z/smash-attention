@@ -2089,3 +2089,17 @@ Four cycles of 3,600 drill transitions + 3,600 fight transitions:
 Recovery held, but the fight phases did not improve over the good checkpoint
 (2 deaths / 10, +31.7 damage).  No final eval was run; the training logs are
 enough to keep `rl_cpu7_drill_best.pt`.  All `rl_split_*` checkpoints deleted.
+
+### Good-anchored low-LR drill
+
+Four single-iteration CPU4 drill chunks from `rl_cpu7_drill_best.pt`,
+`lr=2e-5`, KL anchor = the good model:
+
+* recovery: 61%, 81%, 57%, 69%;
+* KL to the good: 0.0004 -> 0.0029;
+* no consistent improvement over the good's 69% drill recovery.
+
+The KL stayed tiny, so the policy barely moved; the recovery spread is noise.
+No eval was run (training logs only).  Keep `rl_cpu7_drill_best.pt`; delete the
+`rl_goodA_*` checkpoints.  Further single-model gains need distillation or a
+different objective, not more low-LR drill.
