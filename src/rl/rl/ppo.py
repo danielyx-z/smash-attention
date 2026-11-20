@@ -1241,13 +1241,19 @@ def main(argv: list[str] | None = None) -> int:
 
         state = PolicyState(cfg)
 
+        health = {"ok": True}
+
         def reset_with_recovery(reset_seed: int, exc: Exception):
             """Escalate: retry, recreate the pad, then restart the game."""
             nonlocal pad
             if pad is None:
                 raise exc
             dump_wedge_diagnostics("reset", log)
-            for attempt in range(1, 4):
+            # A pad fix that was not followed by a single healthy episode did
+            # not work (the game was frozen, not the pad): restart the game.
+            first = 1 if health["ok"] else 2
+            health["ok"] = False
+            for attempt in range(first, 4):
                 log(f"[ppo] reset failed ({exc}); recovery {attempt}/3 "
                     f"({'pad' if attempt == 1 else 'game restart'})")
                 try:
@@ -1262,6 +1268,10 @@ def main(argv: list[str] | None = None) -> int:
 
         def episode_log(row: dict) -> None:
             stats_writer.record_episode(row)
+            if (abs(float(row.get("return", 0.0) or 0.0)) > 1e-9
+                    or int(row.get("p1_deaths", 0) or 0)
+                    or int(row.get("p2_deaths", 0) or 0)):
+                health["ok"] = True
             p1 = row.get("p1_damage")
             p2 = row.get("p2_damage")
             diff = ((float(p2) - float(p1))
@@ -1309,6 +1319,17 @@ def main(argv: list[str] | None = None) -> int:
                         f"pad recovery failed after dead episodes ({exc}); "
                         "stopping with the last checkpoint") from exc
                 log("[ppo] pad recovered; discarding the dead rollout")
+                continue
+            if episodes and pad is not None and all(
+                    abs(float(e.get("return", 0.0) or 0.0)) < 1e-9
+                    and not int(e.get("p1_deaths", 0) or 0)
+                    and not int(e.get("p2_deaths", 0) or 0)
+                    for e in episodes):
+                log("[ppo] iteration with no activity (frozen game?); "
+                    "restarting the game and discarding the rollout")
+                dump_wedge_diagnostics("frozen", log)
+                pad = restart_game(env, pad, args, log)
+                health["ok"] = False
                 continue
             next_values = batch_values(
                 model, batch["next_windows"], batch["next_prevs"],
