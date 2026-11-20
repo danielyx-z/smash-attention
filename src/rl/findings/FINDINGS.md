@@ -2062,3 +2062,18 @@ The final normal chunk was worse still (7/10 deaths, -273.8).  More normal
 CPU7 training under this objective consistently erodes the recovery skill;
 `rl_cpu7_drill_best.pt` remains the best (2/10, +31.7, -18.3).  Stop here
 unless a lower-LR / stronger-anchor normal fine-tune is tried.
+
+### Drill CPU curriculum: training recovery improved, CPU7 play got worse
+
+Drill-only from `rl_cpu7_drill_best.pt`:
+
+* CPU4 drill: 34/54 recovered (63%), CPU7 eval 4 deaths / 10, -212.0;
+* CPU5 drill: 49/64 recovered (77%), CPU7 eval 9 deaths / 10, -472.1.
+
+The drill recovery rate kept improving with CPU difficulty, but the overall
+CPU7 policy regressed.  Offstage-only training still perturbs the shared
+network enough to change on-stage behavior.  The original drill checkpoint
+(2 deaths / 10, -18.3) remains the best; stop the curriculum here.
+
+The CPU6 chunk was stopped before completion.  All `rl_drillA_*` checkpoints
+are deleted; only `rl_cpu7_drill_best.pt` and the BC anchor remain.
