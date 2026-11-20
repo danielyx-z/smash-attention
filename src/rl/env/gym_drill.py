@@ -134,6 +134,8 @@ class RecoveryDrillEnv:
         self.attempts = max(1, int(attempts))
         self.settle_reset_steps = max(0, int(settle_reset_steps))
         self.drill_prob = min(1.0, max(0.0, float(drill_prob)))
+        self.max_fallbacks = 2          # consecutive setup failures = dead pad
+        self._fallbacks = 0
         lo, hi = sorted(float(v) for v in handoff_y_range)
         self.handoff_y_range = (lo, hi)
         self.log = log or (lambda *_a, **_k: None)
@@ -209,9 +211,20 @@ class RecoveryDrillEnv:
         last_error: Exception | None = None
         for _attempt in range(self.attempts):
             try:
-                return self._reset_once(seed)
+                out = self._reset_once(seed)
+                self._fallbacks = 0
+                return out
             except DrillSetupError as exc:
                 last_error = exc
+        self._fallbacks += 1
+        if self._fallbacks >= self.max_fallbacks:
+            # A single failure is a quirk; several in a row mean P1 no longer
+            # answers the pad (observed: 0 damage dealt for 25 iterations).
+            # Raise a plain error so the trainer recovers the pad / game.
+            self._fallbacks = 0
+            raise RuntimeError(
+                f"P1 unresponsive: {self.max_fallbacks} drill setups in a row "
+                f"failed ({last_error})")
         # The setup is only a scripted run-off.  A failure is not a game
         # wedge, so play a normal episode instead of escalating to a restart.
         self.log(f"[drill] setup failed {self.attempts}x ({last_error}); "

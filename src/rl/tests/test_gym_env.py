@@ -1345,3 +1345,21 @@ class TestEnv(EnvCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class _DeadPadEnv(_LedgeCatchEnv):
+    """P1 never moves: the stage never ends and no stick has any effect."""
+
+    def step(self, action):
+        return np.zeros(8, np.float32), 0.0, False, False, self._info()
+
+
+class DeadPadTest(unittest.TestCase):
+    def test_repeated_setup_failure_escalates_instead_of_hiding(self):
+        from rl.env import gym_drill
+        env = gym_drill.RecoveryDrillEnv(_DeadPadEnv(), setup_steps=5,
+                                         attempts=2)
+        env.reset(seed=0)                    # first failure: normal episode
+        with self.assertRaises(RuntimeError) as ctx:
+            env.reset(seed=1)                # second in a row: escalate
+        self.assertIn("unresponsive", str(ctx.exception))
