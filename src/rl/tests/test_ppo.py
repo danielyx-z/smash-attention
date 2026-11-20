@@ -136,6 +136,48 @@ class EpisodeRowTest(unittest.TestCase):
         self.assertEqual(plain["p1_damage"], 0.0)
 
 
+class DeathAutopsyTest(unittest.TestCase):
+    def snap(self, **kw):
+        base = {"damage": 50.0, "x": 0.0, "y": 0.0, "vx": 0.0, "vy": 0.0,
+                "state": 0, "jumps": 1, "ground": 1, "hitstun": 0.0}
+        base.update(kw)
+        return base
+
+    def test_helpless_fall_is_labelled(self):
+        hist = [self.snap(), self.snap(y=-30.0, ground=0, state=36),
+                self.snap(y=-80.0, ground=0, state=20, jumps=0)]
+        d = ppo.classify_death(hist)
+        self.assertEqual(d["cause"], "helpless")
+        self.assertEqual(d["fall_steps"], 2)
+        self.assertTrue(d["helpless"])
+
+    def test_blast_zone_and_unrecovered_fall(self):
+        side = ppo.classify_death([self.snap(), self.snap(x=170.0, y=10.0,
+                                                          ground=0,
+                                                          damage=140.0)])
+        self.assertEqual(side["cause"], "blast_side")
+        self.assertEqual(side["damage"], 140.0)
+        fall = ppo.classify_death([self.snap(),
+                                   self.snap(y=-60.0, ground=0, state=18)])
+        self.assertEqual(fall["cause"], "no_return")
+        self.assertEqual(ppo.classify_death([])["cause"], "unknown")
+
+    def test_load_keeps_a_trained_critic(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bc.pt")
+            ckpt = tiny_checkpoint(path)
+            model, *_ = ppo.load_bc_model(path, "cpu")
+            self.assertEqual(float(model.value_head.weight.abs().sum()), 0.0)
+            with torch.no_grad():
+                model.value_head.weight.fill_(0.5)
+            ckpt["state_dict"] = model.state_dict()
+            ckpt["config"]["value_head"] = True
+            torch.save(ckpt, path)
+            again, *_ = ppo.load_bc_model(path, "cpu")
+            self.assertGreater(float(again.value_head.weight.abs().sum()), 0.0)
+
+
 class GAETest(unittest.TestCase):
     def test_matches_manual_returns(self):
         rewards = np.array([1.0, 1.0], np.float32)

@@ -251,9 +251,12 @@ def load_bc_model(path: str, device: str,
         raise ValueError(
             "checkpoint does not match the BC architecture; missing "
             f"{sorted(set(missing) - allowed)}, unexpected {sorted(unexpected)}")
-    if model.value_head is not None:
-        # Start the critic at zero: PPO learns the value scale from the
-        # damage reward instead of trusting random initial outputs.
+    # Start a *fresh* critic at zero: PPO learns the value scale from the
+    # reward instead of trusting random initial outputs.  A checkpoint that
+    # already carries a trained critic (an earlier PPO run) must keep it;
+    # zeroing it made every chunk restart update the policy against V=0.
+    has_critic = not (set(missing) & allowed)
+    if model.value_head is not None and not has_critic:
         torch.nn.init.zeros_(model.value_head.weight)
         torch.nn.init.zeros_(model.value_head.bias)
     payload = ckpt.get("vocab")
@@ -395,6 +398,69 @@ def _offstage_flag(info: dict, slot: int = 0) -> bool:
         return False
 
 
+def _ego_snapshot(info: dict, slot: int = 0) -> dict:
+    """The ego fields the death autopsy needs, from an env info dict."""
+    fighters = info.get("raw_fighters") or []
+    if len(fighters) <= int(slot):
+        return {}
+    f = fighters[int(slot)]
+
+    def num(key, default=0.0):
+        try:
+            return float(f.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+    return {"damage": num("damage"), "x": num("x"), "y": num("y"),
+            "vx": num("vx"), "vy": num("vy"),
+            "state": int(num("action_state", -1)),
+            "jumps": int(num("jumps_left")),
+            "ground": int(num("on_ground")),
+            "hitstun": num("hitstun")}
+
+
+def classify_death(history: list[dict]) -> dict:
+    """Autopsy of one P1 death from the last ego snapshots (oldest first).
+
+    ``history[-1]`` is the frame before the rebirth flag turned on, so its
+    damage and position are the ones the fighter died with.  The cause is a
+    coarse label, enough to tell whether recovery training can help:
+
+    * ``blast_side/top``: launched out past a side/top blast zone, usually
+      at high damage; recovery cannot fix it, damage avoidance can.
+    * ``helpless``: died in special fall after Up Special (jump order).
+    * ``no_return``: fell from the ledge without a helpless state.
+    """
+    if not history:
+        return {"cause": "unknown"}
+    last = history[-1]
+    helpless = any(h.get("state") in (20, 21) for h in history[-90:])
+    jumps_min = min(h.get("jumps", 0) for h in history[-90:])
+    below = [h for h in history if h.get("y", 0.0) < -10.0
+             and not h.get("ground")]
+    # steps spent airborne below the stage before the death frame
+    fall_steps = 0
+    for h in reversed(history):
+        if h.get("y", 0.0) < -10.0 and not h.get("ground"):
+            fall_steps += 1
+        else:
+            break
+    hit_recent = any(b["damage"] > a["damage"] + 0.5
+                     for a, b in zip(history[-60:], history[-59:]))
+    x, y = last.get("x", 0.0), last.get("y", 0.0)
+    if y < -10.0:
+        cause = "helpless" if helpless else "no_return"
+    elif y > 80.0:
+        cause = "blast_top"
+    elif abs(x) > 150.0:
+        cause = "blast_side"
+    else:
+        cause = "other"
+    return {"cause": cause, "damage": round(last.get("damage", 0.0), 1),
+            "x": round(x, 1), "y": round(y, 1), "helpless": bool(helpless),
+            "jumps_min": int(jumps_min), "fall_steps": int(fall_steps),
+            "hit_recent": bool(hit_recent), "offstage": bool(below)}
+
+
 def _rebirth_flags(info: dict) -> list[bool]:
     """[P1_on_rebirth, P2_on_rebirth] from an env info dict."""
     out = []
@@ -413,7 +479,8 @@ def _episode_row(info: dict, length: int, ret: float,
                  peak: dict | None = None,
                  deaths: dict | None = None,
                  totals: dict | None = None,
-                 death_rewards: list | None = None) -> dict:
+                 death_rewards: list | None = None,
+                 death_infos: list | None = None) -> dict:
     """Summarize one episode.
 
     The last info frame can be a respawn with damage reset to 0, so the final
@@ -440,6 +507,7 @@ def _episode_row(info: dict, length: int, ret: float,
             "p1_deaths": int(deaths.get("p1", 0)),
             "p2_deaths": int(deaths.get("p2", 0)),
             "death_rewards": [float(x) for x in (death_rewards or [])],
+            "death_infos": list(death_infos or []),
             "terminated": bool(terminated), "truncated": bool(truncated)}
 
 
@@ -493,6 +561,10 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     prev_damages = _damages(info)
     deaths = {"p1": 0, "p2": 0}
     death_rewards: list[float] = []
+    death_infos: list[dict] = []
+    ego_hist: deque = deque(maxlen=240)
+    ego_slot_id = int(getattr(env, "ego_slot", 0) or 0)
+    ego_hist.append(_ego_snapshot(info, ego_slot_id))
     while len(rewards) < steps:
         window = state.window().copy()
         prev = state.prev.copy()
@@ -526,7 +598,13 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         for i, key in enumerate(("p1", "p2")):
             if curr_rebirth[i] and not prev_rebirth[i]:
                 deaths[key] += 1
-                death_rewards.append(float(reward))
+                if key == "p1":
+                    death_rewards.append(float(reward))
+                    # history still ends at the frame before the rebirth
+                    death_infos.append(classify_death(list(ego_hist)))
+                else:
+                    death_rewards.append(float(reward))
+        ego_hist.append(_ego_snapshot(info, ego_slot_id))
         prev_rebirth = curr_rebirth
         curr_damages = _damages(info)
         ep_taken += max(0.0, curr_damages[0] - prev_damages[0])
@@ -548,7 +626,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             row = _episode_row(
                 info, ep_len, ep_ret, terminated, truncated, peak, deaths,
                 totals={"dealt": ep_dealt, "taken": ep_taken},
-                death_rewards=death_rewards)
+                death_rewards=death_rewards, death_infos=death_infos)
             episodes.append(row)
             if on_episode is not None:
                 on_episode(row)
@@ -564,6 +642,9 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             prev_damages = _damages(info)
             deaths = {"p1": 0, "p2": 0}
             death_rewards = []
+            death_infos = []
+            ego_hist.clear()
+            ego_hist.append(_ego_snapshot(info, ego_slot_id))
     batch = {
         "windows": np.stack(windows).astype(np.float32),
         "prevs": np.stack(prevs).astype(np.float32),
@@ -1070,6 +1151,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"deaths P1 {row.get('p1_deaths', 0)}/"
                 f"P2 {row.get('p2_deaths', 0)} "
                 f"death_rew {row.get('death_rewards', [])}")
+            for d in row.get("death_infos", []):
+                log("[ppo] death: " + " ".join(f"{k}={v}" for k, v in d.items()))
 
         for iteration in range(1, int(ppo.iterations) + 1):
             t0 = time.monotonic()
