@@ -1036,9 +1036,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ledge-timeout", type=int, default=45,
                     help="force a getup after this many decisions hanging on "
                          "the ledge (0 = off)")
-    ap.add_argument("--drill-fall-delay", type=int, default=4,
-                    help="max extra decisions of free fall before the policy "
-                         "gets control in the drill (small = earlier handoff)")
+    ap.add_argument("--drill-min-y", type=float, default=-60.0,
+                    help="deepest y at which the drill hands control over")
+    ap.add_argument("--drill-max-y", type=float, default=-10.0,
+                    help="shallowest y at which the drill hands control over")
     ap.add_argument("--recovery-drill", action="store_true",
                     help="run P1 off the ledge, then hand control to the "
                          "policy mid-fall (training only)")
@@ -1226,7 +1227,8 @@ def main(argv: list[str] | None = None) -> int:
                     settle_reset_steps=int(args.drill_settle_steps),
                     recovery_bonus=float(args.recovery_bonus),
                     drill_prob=float(args.drill_prob),
-                    fall_delay_max=int(args.drill_fall_delay), log=log)
+                    handoff_y_range=(args.drill_min_y, args.drill_max_y),
+                    log=log)
                 log("[ppo] recovery drill: run P1 off the ledge, then hand "
                     "control to the policy mid-fall")
 

@@ -125,7 +125,7 @@ class RecoveryDrillEnv:
     def __init__(self, env: Any, setup_steps: int = 180,
                  settle_steps: int = 2, recovery_bonus: float = 0.5,
                  attempts: int = 3, settle_reset_steps: int = 90,
-                 drill_prob: float = 1.0, fall_delay_max: int = 24,
+                 drill_prob: float = 1.0, handoff_y_range: tuple = (-60.0, -10.0),
                  log=None):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
@@ -134,7 +134,8 @@ class RecoveryDrillEnv:
         self.attempts = max(1, int(attempts))
         self.settle_reset_steps = max(0, int(settle_reset_steps))
         self.drill_prob = min(1.0, max(0.0, float(drill_prob)))
-        self.fall_delay_max = max(0, int(fall_delay_max))
+        lo, hi = sorted(float(v) for v in handoff_y_range)
+        self.handoff_y_range = (lo, hi)
         self.log = log or (lambda *_a, **_k: None)
         self._drill = True
         self.setup_observations: list[np.ndarray] = []
@@ -256,7 +257,8 @@ class RecoveryDrillEnv:
         # falling offstage it falls a random few more decisions so the policy
         # starts from a range of depths.
         rng = np.random.default_rng(None if seed is None else int(seed) + 7919)
-        delay = int(rng.integers(0, self.fall_delay_max + 1))
+        # the policy gets control once it has fallen to this depth
+        target_y = float(rng.uniform(*self.handoff_y_range))
         offstage = False
         drops = 0
         for _ in range(self.setup_steps):
@@ -265,10 +267,9 @@ class RecoveryDrillEnv:
                 action = _neutral(0.0, -1.0)           # drop from the ledge
                 drops += 1
             elif is_offstage(info, self.ego_slot):
-                if delay <= 0:
+                if _num(fighter, "y") <= target_y:
                     offstage = True
                     break
-                delay -= 1
                 action = _neutral(0.0)                 # fall straight
             else:
                 action = _neutral(direction)           # run toward the edge

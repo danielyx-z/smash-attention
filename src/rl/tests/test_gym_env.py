@@ -556,7 +556,7 @@ class _DrillFakeEnv:
 def _drill(env, **kw):
     """RecoveryDrillEnv with a deterministic (zero) extra fall delay."""
     from rl.env import gym_drill
-    kw.setdefault("fall_delay_max", 0)
+    kw.setdefault("handoff_y_range", (-10.0, -10.0))
     return gym_drill.RecoveryDrillEnv(env, **kw)
 
 
@@ -569,18 +569,20 @@ class _LedgeCatchEnv:
     def __init__(self):
         self.mode = "stage"
         self.hang_steps = 0
+        self.fall_steps = 0
         self.action_space = gymnasium_spaces_box()
 
     def _info(self):
         f = {"stage": dict(x=-60.0, y=0.0, on_ground=1, action_state=0),
              "ledge": dict(x=-83.6, y=-27.4, on_ground=0, action_state=119),
-             "fall": dict(x=-86.0, y=-40.0, on_ground=0, action_state=14)}
+             "fall": dict(x=-86.0, y=-12.0 - 6.0 * self.fall_steps, on_ground=0,
+                          action_state=14)}
         ego = dict(f[self.mode], is_on_rebirth=0, damage=0.0)
         return {"raw_fighters": [ego, {"x": 20.0, "y": 0.0, "on_ground": 1,
                                        "is_on_rebirth": 0, "damage": 0.0}]}
 
     def reset(self, seed=None):
-        self.mode, self.hang_steps = "stage", 0
+        self.mode, self.hang_steps, self.fall_steps = "stage", 0, 0
         return np.zeros(8, np.float32), self._info()
 
     def step(self, action):
@@ -591,6 +593,8 @@ class _LedgeCatchEnv:
             self.hang_steps += 1
             if sy < -0.5:
                 self.mode = "fall"         # only stick-down drops
+        elif self.mode == "fall":
+            self.fall_steps += 1
         return np.zeros(8, np.float32), 0.0, False, False, self._info()
 
 
@@ -668,7 +672,8 @@ class RecoveryDrillTest(unittest.TestCase):
         seen = set()
         for seed in range(12):
             env = gym_drill.RecoveryDrillEnv(
-                _LedgeCatchEnv(), setup_steps=60, fall_delay_max=8)
+                _LedgeCatchEnv(), setup_steps=60,
+                handoff_y_range=(-60.0, -10.0))
             env.reset(seed=seed)
             seen.add(len(env.setup_observations))
         self.assertGreater(len(seen), 2)
