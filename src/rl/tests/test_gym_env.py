@@ -553,6 +553,47 @@ class _DrillFakeEnv:
                 and self.i > 3 else 0.0, False, False, info)
 
 
+def _drill(env, **kw):
+    """RecoveryDrillEnv with a deterministic (zero) extra fall delay."""
+    from rl.env import gym_drill
+    kw.setdefault("fall_delay_max", 0)
+    return gym_drill.RecoveryDrillEnv(env, **kw)
+
+
+class _LedgeCatchEnv:
+    """Running off the edge catches the ledge; stick-down drops from it."""
+
+    max_steps = 60
+    ego_slot = 0
+
+    def __init__(self):
+        self.mode = "stage"
+        self.hang_steps = 0
+        self.action_space = gymnasium_spaces_box()
+
+    def _info(self):
+        f = {"stage": dict(x=-60.0, y=0.0, on_ground=1, action_state=0),
+             "ledge": dict(x=-83.6, y=-27.4, on_ground=0, action_state=119),
+             "fall": dict(x=-86.0, y=-40.0, on_ground=0, action_state=14)}
+        ego = dict(f[self.mode], is_on_rebirth=0, damage=0.0)
+        return {"raw_fighters": [ego, {"x": 20.0, "y": 0.0, "on_ground": 1,
+                                       "is_on_rebirth": 0, "damage": 0.0}]}
+
+    def reset(self, seed=None):
+        self.mode, self.hang_steps = "stage", 0
+        return np.zeros(8, np.float32), self._info()
+
+    def step(self, action):
+        sx, sy = float(action["stick"][0]), float(action["stick"][1])
+        if self.mode == "stage" and sx < -0.5:
+            self.mode = "ledge"            # runs off and grabs the ledge
+        elif self.mode == "ledge":
+            self.hang_steps += 1
+            if sy < -0.5:
+                self.mode = "fall"         # only stick-down drops
+        return np.zeros(8, np.float32), 0.0, False, False, self._info()
+
+
 def gymnasium_spaces_box():
     from gymnasium import spaces
     return spaces.Box(-1.0, 1.0, (17,), np.float32)
@@ -561,7 +602,7 @@ def gymnasium_spaces_box():
 class RecoveryDrillTest(unittest.TestCase):
     def test_setup_runs_offstage_then_hands_control(self):
         from rl.env import gym_drill
-        env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("recover"),
+        env = _drill(_DrillFakeEnv("recover"),
                                          setup_steps=10,
                                          recovery_bonus=0.5)
         obs, info = env.reset(seed=0)
@@ -574,9 +615,27 @@ class RecoveryDrillTest(unittest.TestCase):
         self.assertTrue(terminated)
         self.assertAlmostEqual(reward, 0.5)
 
+    def test_setup_drops_from_the_ledge_instead_of_waiting(self):
+        from rl.env import gym_drill
+        env = _drill(_LedgeCatchEnv(), setup_steps=30)
+        obs, info = env.reset(seed=0)
+        self.assertTrue(gym_drill.is_offstage(info))
+        self.assertGreaterEqual(env.env.hang_steps, 1)   # it did hang first
+        self.assertLess(env.env.hang_steps, 5)           # and did not wait
+
+    def test_fall_delay_varies_the_start_depth(self):
+        from rl.env import gym_drill
+        seen = set()
+        for seed in range(12):
+            env = gym_drill.RecoveryDrillEnv(
+                _LedgeCatchEnv(), setup_steps=60, fall_delay_max=8)
+            env.reset(seed=seed)
+            seen.add(len(env.setup_observations))
+        self.assertGreater(len(seen), 2)
+
     def test_drill_prob_zero_keeps_normal_episodes(self):
         from rl.env import gym_drill
-        env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("recover"),
+        env = _drill(_DrillFakeEnv("recover"),
                                          drill_prob=0.0)
         obs, info = env.reset(seed=0)
         self.assertIsNone(env.setup_action)
@@ -586,7 +645,7 @@ class RecoveryDrillTest(unittest.TestCase):
 
     def test_death_ends_the_drill(self):
         from rl.env import gym_drill
-        env = gym_drill.RecoveryDrillEnv(_DrillFakeEnv("death"),
+        env = _drill(_DrillFakeEnv("death"),
                                          setup_steps=10)
         env.reset(seed=0)
         obs, reward, terminated, truncated, info = env.step({})

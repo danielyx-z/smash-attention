@@ -72,10 +72,10 @@ def is_offstage(info: dict, slot: int = EGO_SLOT) -> bool:
     return _num(fighter, "y") < -10.0
 
 
-def _neutral(stick_x: float) -> dict:
+def _neutral(stick_x: float, stick_y: float = 0.0) -> dict:
     return {
         "buttons": np.zeros(12, np.float32),
-        "stick": np.array([float(stick_x), 0.0], np.float32),
+        "stick": np.array([float(stick_x), float(stick_y)], np.float32),
         "cstick": np.zeros(2, np.float32),
         "trigger": 0.0,
     }
@@ -121,7 +121,8 @@ class RecoveryDrillEnv:
     def __init__(self, env: Any, setup_steps: int = 180,
                  settle_steps: int = 2, recovery_bonus: float = 0.5,
                  attempts: int = 3, settle_reset_steps: int = 90,
-                 drill_prob: float = 1.0, log=None):
+                 drill_prob: float = 1.0, fall_delay_max: int = 24,
+                 log=None):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
         self.settle_steps = max(1, int(settle_steps))
@@ -129,6 +130,7 @@ class RecoveryDrillEnv:
         self.attempts = max(1, int(attempts))
         self.settle_reset_steps = max(0, int(settle_reset_steps))
         self.drill_prob = min(1.0, max(0.0, float(drill_prob)))
+        self.fall_delay_max = max(0, int(fall_delay_max))
         self.log = log or (lambda *_a, **_k: None)
         self._drill = True
         self.setup_observations: list[np.ndarray] = []
@@ -233,17 +235,36 @@ class RecoveryDrillEnv:
         x = _num(fighter, "x")
         direction = -1.0 if x <= 0.0 else 1.0
         action = _neutral(direction)
+        # Setup state machine.  Running off the edge often ends with the ego
+        # *catching the ledge*, which is safe (not offstage), so the setup
+        # must drop from it (stick down) instead of waiting forever.  Once
+        # falling offstage it falls a random few more decisions so the policy
+        # starts from a range of depths.
+        rng = np.random.default_rng(None if seed is None else int(seed) + 7919)
+        delay = int(rng.integers(0, self.fall_delay_max + 1))
         offstage = False
+        drops = 0
         for _ in range(self.setup_steps):
+            fighter = _ego(info, self.ego_slot)
+            if on_ledge(fighter):
+                action = _neutral(0.0, -1.0)           # drop from the ledge
+                drops += 1
+            elif is_offstage(info, self.ego_slot):
+                if delay <= 0:
+                    offstage = True
+                    break
+                delay -= 1
+                action = _neutral(0.0)                 # fall straight
+            else:
+                action = _neutral(direction)           # run toward the edge
             result = self.env.step(action)
             obs, _reward, terminated, truncated, info = _split_step(result)
             observations.append(np.asarray(obs, np.float32))
-            if is_offstage(info, self.ego_slot):
-                offstage = True
-                break
             fighter = _ego(info, self.ego_slot)
             if _flag(fighter, "is_on_rebirth") or terminated or truncated:
                 break
+        if not offstage and is_offstage(info, self.ego_slot):
+            offstage = True
         if not offstage:
             raise RuntimeError(
                 "recovery drill: P1 did not leave the stage during setup")
@@ -255,7 +276,7 @@ class RecoveryDrillEnv:
         self._ground_steps = 0
         self._steps = 0
         self.log(f"[drill] setup {len(observations)} steps, direction "
-                 f"{direction:+.0f}, offstage P1 at "
+                 f"{direction:+.0f}, ledge drops {drops}, offstage P1 at "
                  f"x={_num(_ego(info, self.ego_slot), 'x'):+.1f} "
                  f"y={_num(_ego(info, self.ego_slot), 'y'):+.1f}")
         return obs, info
