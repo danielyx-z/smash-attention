@@ -2103,3 +2103,35 @@ The KL stayed tiny, so the policy barely moved; the recovery spread is noise.
 No eval was run (training logs only).  Keep `rl_cpu7_drill_best.pt`; delete the
 `rl_goodA_*` checkpoints.  Further single-model gains need distillation or a
 different objective, not more low-LR drill.
+
+### Status ids were wrong; the policy and the reward were partly blind
+
+`schema.ACTION_STATE_NAMES` came from an older numbering and is wrong for most
+ids.  Verified on this build (probes + 2.16 M recorded frames, see
+`rl/memory/status_kinds.py`): ledge catch/hang/getup 117-123 (hang point
+x=+-83.6, y=-27.44), helpless fall after Up-B 16, Up-B 478, specials 476-479,
+KO 470, respawn 181/182.  These are the **common** status table, so the
+problem is not DK-specific; only fighter-specific sub-states (ids >= ~500)
+differ per character.
+
+Consequences, all fixed:
+
+* the doomed-fall penalty used ids 20/21 that never occur: it was always 0;
+* a ledge hang (y=-27, `on_ground=0`) counted as offstage and was penalized;
+  stage_half_width was 100 instead of 83.6;
+* `hitstun` flagged 476-479 (the special moves), so it read 1 during Up-B and
+  every other special; it is now derived from the real damage/down ids in the
+  observation layer so old recordings agree with live frames;
+* the observation one-hot covered 39 % of frames and put every recovery state
+  (Up-B, helpless, ledge, KO, respawn) into OTHER; the new table covers 80 %
+  and the family flags are ledge/special/helpless/ko_rebirth/damage/down.
+  BC and PPO checkpoints built on the old table are obsolete (same shape,
+  different meaning).
+
+Checked and fine: `dx/dy`, `facing_rel`, `dist_to_blast` (exact), `jumps_left`
+(0-2), no non-finite values; blast zones are L/R/T/B = -240/240/180/-140.
+
+Control run (good model, lr~0, 40 CPU7 episodes): 0.38 deaths/episode,
+damage diff +1.6 (sd 40), so 10-episode evals cannot rank checkpoints.  Deaths:
+14/15 were falls to the bottom blast zone at a median 43 % damage (8 of 15 with
+no hit in the last 60 decisions), 1 side blast.
