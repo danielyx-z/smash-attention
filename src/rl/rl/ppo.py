@@ -792,6 +792,92 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
     return {k: v / max(1, seen) for k, v in stats.items()}
 
 
+def dump_wedge_diagnostics(tag: str, log) -> str | None:
+    """Save what the runtime looked like when a reset was never acknowledged."""
+    import json
+    import subprocess
+    path = f"/tmp/ssbu_wedge_{int(time.time())}_{tag}.txt"
+    try:
+        parts = []
+        try:
+            from rl.input.control_block import ControlBlock
+            with ControlBlock(create=False) as cb:
+                parts.append(f"control: {cb.read()}")
+        except Exception as exc:                  # noqa: BLE001
+            parts.append(f"control: unreadable ({exc})")
+        try:
+            from rl.input.gym_reset import read_state
+            parts.append(f"state: {read_state()}")
+        except Exception as exc:                  # noqa: BLE001
+            parts.append(f"state: unreadable ({exc})")
+        try:
+            out = subprocess.run(
+                ["ps", "-eo", "pid,etime,pcpu,rss,stat,wchan:20,comm"],
+                capture_output=True, text=True, timeout=5).stdout
+            parts.append("\n".join(l for l in out.splitlines()
+                                   if "ssbu" in l or "PID" in l))
+        except Exception as exc:                  # noqa: BLE001
+            parts.append(f"ps failed ({exc})")
+        try:
+            with open(os.path.expanduser("~/smash.log"), "r",
+                      errors="ignore") as fh:
+                parts.append("--- smash.log tail\n" + "".join(fh.readlines()[-40:]))
+        except OSError:
+            pass
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(str(x) for x in parts))
+        log(f"[ppo] wedge diagnostics -> {path}")
+        return path
+    except Exception:                             # noqa: BLE001
+        return None
+
+
+def restart_game(env, pad, args, log):
+    """Relaunch the game, the reader and the pad inside this process.
+
+    The trainer keeps its model, critic and optimizer; only the live game is
+    replaced.  Returns the new pad.  Raises if the fight does not come up.
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    live_sh = os.path.abspath(os.path.join(here, "..", "scripts", "live.sh"))
+    match = os.environ.get("SSBU_LIVE_MATCH")
+    if not match:
+        raise RuntimeError("restart_game needs SSBU_LIVE_MATCH (use live_rl.sh)")
+    try:
+        if pad is not None:
+            pad.destroy()
+    except Exception:                             # noqa: BLE001
+        pass
+    log("[ppo] restarting the game (keeping the model and optimizer)")
+    subprocess.run(["pkill", "-x", "ssbu_native"], check=False)
+    time.sleep(2.0)
+    rc = subprocess.run([live_sh, "--no-focus", "--keyboard", "0",
+                         "--match", match], capture_output=True, text=True,
+                        timeout=240)
+    if rc.returncode != 0:
+        raise RuntimeError(f"live.sh failed: {rc.stderr[-300:]}")
+    from rl.input.gym_input import VirtualPad
+    from rl.input.gym_reset import ResetClient
+    new_pad = VirtualPad().create()
+    base = getattr(env, "base_env", env)
+    base._input_adapter = new_pad
+    base._input_resolved = True
+    # a fresh control block / state file: re-resolve both
+    try:
+        base.reader.close()
+    except Exception:                             # noqa: BLE001
+        pass
+    base._reset_fn = ResetClient(timeout=float(args.reset_timeout)).reset
+    base._reset_resolved = True
+    ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
+    game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
+    if not ge.drive_menus(base, new_pad, args.menu_timeout, log=log,
+                          speed=game_speed):
+        raise RuntimeError("game restarted but the fight did not start")
+    return new_pad
+
+
 def recover_pad(env, pad, args, log) -> Any:
     """Recreate the virtual pad after P1 input stalls, without rebooting the game."""
     from rl.input.gym_input import VirtualPad
@@ -944,6 +1030,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-loss-weight", type=float, default=1.0,
                     help="per-sample PPO loss multiplier on offstage states "
                          "(1 = uniform; e.g. 3)")
+    ap.add_argument("--restart-every", type=int, default=0,
+                    help="restart the game every N iterations, keeping the "
+                         "optimizer (prevention for the runtime wedge; 0=off)")
+    ap.add_argument("--ledge-timeout", type=int, default=45,
+                    help="force a getup after this many decisions hanging on "
+                         "the ledge (0 = off)")
     ap.add_argument("--recovery-drill", action="store_true",
                     help="run P1 off the ledge, then hand control to the "
                          "policy mid-fall (training only)")
@@ -1113,6 +1205,13 @@ def main(argv: list[str] | None = None) -> int:
                                       speed=game_speed):
                     log("[ppo] giving up: no fight")
                     return 2
+        if int(args.ledge_timeout) > 0 and not args.mock:
+            from rl.env.gym_ledge import LedgeTimeoutEnv
+            env = LedgeTimeoutEnv(env, max_hang=int(args.ledge_timeout),
+                                  log=log)
+            log(f"[ppo] ledge timeout: forced getup after "
+                f"{args.ledge_timeout} decisions on the ledge")
+
         if args.recovery_drill:
             if args.mock:
                 log("[ppo] --recovery-drill needs the live game; ignoring "
@@ -1137,16 +1236,21 @@ def main(argv: list[str] | None = None) -> int:
         state = PolicyState(cfg)
 
         def reset_with_recovery(reset_seed: int, exc: Exception):
+            """Escalate: retry, recreate the pad, then restart the game."""
             nonlocal pad
             if pad is None:
                 raise exc
-            for attempt in range(2):
-                log(f"[ppo] reset failed ({exc}); recovering the pad and "
-                    f"retrying ({attempt + 1}/2)")
-                pad = recover_pad(env, pad, args, log)
+            dump_wedge_diagnostics("reset", log)
+            for attempt in range(1, 4):
+                log(f"[ppo] reset failed ({exc}); recovery {attempt}/3 "
+                    f"({'pad' if attempt == 1 else 'game restart'})")
                 try:
+                    if attempt == 1:
+                        pad = recover_pad(env, pad, args, log)
+                    else:
+                        pad = restart_game(env, pad, args, log)
                     return ge.reset_env(env, reset_seed)
-                except Exception as retry_exc:  # noqa: BLE001
+                except Exception as retry_exc:    # noqa: BLE001
                     exc = retry_exc
             raise exc
 
@@ -1165,6 +1269,10 @@ def main(argv: list[str] | None = None) -> int:
                 log("[ppo] death: " + " ".join(f"{k}={v}" for k, v in d.items()))
 
         for iteration in range(1, int(ppo.iterations) + 1):
+            if (int(args.restart_every) > 0 and iteration > 1
+                    and (iteration - 1) % int(args.restart_every) == 0
+                    and pad is not None):
+                pad = restart_game(env, pad, args, log)
             t0 = time.monotonic()
             batch, episodes = collect_rollout(
                 env, model, state, cfg, vocab, mean, std, device,

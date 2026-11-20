@@ -143,7 +143,7 @@ class RecoveryDrillEnv:
     # -- Gym plumbing -----------------------------------------------------
     @property
     def base_env(self):
-        return self.env
+        return getattr(self.env, "base_env", self.env)
 
     @property
     def action_space(self):

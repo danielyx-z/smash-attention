@@ -599,6 +599,46 @@ def gymnasium_spaces_box():
     return spaces.Box(-1.0, 1.0, (17,), np.float32)
 
 
+class _HangEnv:
+    """Stays on the ledge until it is given a stick-up (getup)."""
+    max_steps = 500
+    ego_slot = 0
+
+    def __init__(self):
+        self.on_ledge = True
+        self.actions = []
+
+    def reset(self, seed=None):
+        self.on_ledge = True
+        return np.zeros(8, np.float32), self._info()
+
+    def _info(self):
+        st = 119 if self.on_ledge else 0
+        return {"raw_fighters": [{"action_state": st}, {"action_state": 0}]}
+
+    def step(self, action):
+        self.actions.append(float(action["stick"][1]))
+        if float(action["stick"][1]) > 0.5:
+            self.on_ledge = False
+        return np.zeros(8, np.float32), 0.0, False, False, self._info()
+
+
+class LedgeTimeoutTest(unittest.TestCase):
+    def test_forces_a_getup_and_charges_for_it(self):
+        from rl.env.gym_ledge import LedgeTimeoutEnv
+        env = LedgeTimeoutEnv(_HangEnv(), max_hang=5, penalty=0.1)
+        env.reset()
+        neutral = {"buttons": np.zeros(12, np.float32),
+                   "stick": np.zeros(2, np.float32),
+                   "cstick": np.zeros(2, np.float32), "trigger": 0.0}
+        rewards = [env.step(neutral)[1] for _ in range(8)]
+        self.assertEqual(env.env.actions[:5], [0.0] * 5)   # policy's own
+        self.assertEqual(env.env.actions[5], 1.0)          # then forced getup
+        self.assertAlmostEqual(rewards[5], -0.1)           # and charged
+        self.assertEqual(env.forced, 1)                    # off the ledge: done
+        self.assertEqual(rewards[6], 0.0)
+
+
 class RecoveryDrillTest(unittest.TestCase):
     def test_setup_runs_offstage_then_hands_control(self):
         from rl.env import gym_drill

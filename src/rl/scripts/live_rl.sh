@@ -34,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+export SSBU_LIVE_MATCH="$MATCH"   # ppo.restart_game relaunches with the same match
 export SSBU_KEYBOARD_PLAYER=0
 export SSBU_INPUT_NO_FOCUS=1
 export SSBU_RL_MODE=1
