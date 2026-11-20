@@ -72,6 +72,10 @@ def is_offstage(info: dict, slot: int = EGO_SLOT) -> bool:
     return _num(fighter, "y") < -10.0
 
 
+class DrillSetupError(RuntimeError):
+    """The scripted run-off failed; the game itself is fine."""
+
+
 def _neutral(stick_x: float, stick_y: float = 0.0) -> dict:
     return {
         "buttons": np.zeros(12, np.float32),
@@ -205,18 +209,29 @@ class RecoveryDrillEnv:
         for _attempt in range(self.attempts):
             try:
                 return self._reset_once(seed)
-            except RuntimeError as exc:
+            except DrillSetupError as exc:
                 last_error = exc
-        raise RuntimeError(
-            f"recovery drill setup failed after {self.attempts} attempts "
-            f"({last_error})")
+        # The setup is only a scripted run-off.  A failure is not a game
+        # wedge, so play a normal episode instead of escalating to a restart.
+        self.log(f"[drill] setup failed {self.attempts}x ({last_error}); "
+                 "playing a normal episode instead")
+        self._drill = False
+        result = self.env.reset(seed=seed)
+        obs, info = _split_reset(result)
+        self.setup_observations = []
+        self.setup_action = None
+        self._was_offstage = False
+        self._prev_rebirth = _flag(_ego(info, self.ego_slot), "is_on_rebirth")
+        self._ground_steps = 0
+        self._steps = 0
+        return obs, info
 
     def _reset_once(self, seed: int | None):
         result = self.env.reset(seed=seed)
         obs, info = _split_reset(result)
         fighter = _ego(info, self.ego_slot)
         if not fighter:
-            raise RuntimeError("recovery drill: reset info has no ego fighter")
+            raise DrillSetupError("recovery drill: reset info has no ego fighter")
         # The fast rematch can hand back a fighter that is still on the
         # revival platform.  Wait for a normal on-stage state before running
         # off the ledge; otherwise the setup immediately breaks on rebirth.
@@ -266,7 +281,7 @@ class RecoveryDrillEnv:
         if not offstage and is_offstage(info, self.ego_slot):
             offstage = True
         if not offstage:
-            raise RuntimeError(
+            raise DrillSetupError(
                 "recovery drill: P1 did not leave the stage during setup")
         self.setup_observations = observations[:-1]
         self.setup_action = action
