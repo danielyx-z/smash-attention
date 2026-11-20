@@ -393,6 +393,9 @@ def _offstage_flag(info: dict, slot: int = 0) -> bool:
             return False
         if int(fighter.get("on_ground", 0) or 0) == 1:
             return False
+        from rl.memory import status_kinds
+        if status_kinds.is_ledge(fighter.get("action_state", -1)):
+            return False                  # hanging on the ledge is safe
         return float(fighter.get("y", 0.0) or 0.0) < -10.0
     except (TypeError, ValueError, AttributeError):
         return False
@@ -427,13 +430,19 @@ def classify_death(history: list[dict]) -> dict:
 
     * ``blast_side/top``: launched out past a side/top blast zone, usually
       at high damage; recovery cannot fix it, damage avoidance can.
-    * ``helpless``: died in special fall after Up Special (jump order).
+    * ``helpless``: died in the helpless fall after Up Special (state 16).
     * ``no_return``: fell from the ledge without a helpless state.
     """
     if not history:
         return {"cause": "unknown"}
     last = history[-1]
-    helpless = any(h.get("state") in (20, 21) for h in history[-90:])
+    from rl.memory import status_kinds
+    helpless = any(h.get("state") in status_kinds.HELPLESS_KINDS
+                   for h in history[-90:])
+    upb_used = any(h.get("state") == status_kinds.SPECIAL_HI
+                   for h in history[-240:])
+    ledge_grabbed = any(h.get("state") in status_kinds.LEDGE_KINDS
+                        for h in history[-240:])
     jumps_min = min(h.get("jumps", 0) for h in history[-90:])
     below = [h for h in history if h.get("y", 0.0) < -10.0
              and not h.get("ground")]
@@ -458,6 +467,7 @@ def classify_death(history: list[dict]) -> dict:
     return {"cause": cause, "damage": round(last.get("damage", 0.0), 1),
             "x": round(x, 1), "y": round(y, 1), "helpless": bool(helpless),
             "jumps_min": int(jumps_min), "fall_steps": int(fall_steps),
+            "upb_used": bool(upb_used), "ledge_grabbed": bool(ledge_grabbed),
             "hit_recent": bool(hit_recent), "offstage": bool(below)}
 
 

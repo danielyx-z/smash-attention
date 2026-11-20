@@ -141,7 +141,7 @@ class TestLayout(unittest.TestCase):
         self.assertEqual(gym_obs.OBS_SIZE, 112)
         self.assertEqual(len(gym_obs.FEATURE_NAMES), 112)
         self.assertEqual(gym_obs.FEATURE_NAMES[0], "p1_x")
-        self.assertEqual(gym_obs.FEATURE_NAMES[-1], "p2_is_shieldbreak")
+        self.assertEqual(gym_obs.FEATURE_NAMES[-1], "p2_is_down")
         self.assertEqual(len(gym_obs.FAMILY_FLAGS), 6)
         self.assertEqual(gym_obs.ACTION_ONEHOT_SIZE, 32)
         self.assertEqual(len(gym_obs.CURATED_ACTION_STATES), 31)
@@ -291,7 +291,7 @@ class TestObservation(unittest.TestCase):
             0, x=100.0, y=-50.0, vx=25.0, vy=-10.0, damage=42.0, facing=-1.0,
             on_ground=0, is_actionable=1, jumps_left=1, action_frame=30.0,
             shield=1, dist_to_blast=60.0, hitstun=7, is_on_rebirth=1,
-            action_state=2, dx=40.0, dy=30.0, facing_rel=-1)
+            action_state=10, dx=40.0, dy=30.0, facing_rel=-1)
         self.fix.set_fighter(1, x=-20.0, action_state=999, dx=-40.0, dy=-30.0,
                              facing_rel=0)
         s = self._snapshot()
@@ -299,13 +299,13 @@ class TestObservation(unittest.TestCase):
 
         # P1 scalars in contract order
         expected = [100.0, -50.0, 25.0, -10.0, 42.0, -1.0, 0.0, 1.0,
-                    1.0, 30.0, 1.0, 60.0, 7.0, 1.0]
+                    1.0, 30.0, 1.0, 60.0, 0.0, 1.0]   # hitstun derived: GUARD is not
         np.testing.assert_allclose(obs[:14], expected)
 
-        # RUN (id 2) is curated index 2
+        # GUARD (id 10) is curated index 3
         p1_oh = obs[14:46]
         self.assertEqual(p1_oh.sum(), 1.0)
-        self.assertEqual(int(p1_oh.argmax()), 2)
+        self.assertEqual(int(p1_oh.argmax()), 3)
         # dx, dy, distance=50, facing_rel
         np.testing.assert_allclose(obs[46:50], [40.0, 30.0, 50.0, -1.0])
 
@@ -314,7 +314,7 @@ class TestObservation(unittest.TestCase):
         self.assertEqual(p2_oh.sum(), 1.0)
         self.assertEqual(int(p2_oh.argmax()), 31)
         np.testing.assert_allclose(obs[102:106], [-40.0, -30.0, 50.0, 0.0])
-        # RUN is no family
+        # GUARD is no family
         np.testing.assert_allclose(obs[50:56], np.zeros(6, dtype=np.float32))
         np.testing.assert_allclose(obs[106:112], np.zeros(6, dtype=np.float32))
 
@@ -355,9 +355,13 @@ class TestObservation(unittest.TestCase):
             self.assertEqual(vec.sum(), 1.0)
 
     def test_family_flags(self):
-        cases = {78: "is_escape", 80: "is_escape", 71: "is_tech",
-                 75: "is_ledge", 48: "is_catch", 43: "is_catch",
-                 85: "is_landing", 124: "is_shieldbreak", 130: "is_shieldbreak"}
+        # real status ids of this build (rl.memory.status_kinds)
+        cases = {117: "is_ledge", 119: "is_ledge", 123: "is_ledge",
+                 476: "is_special", 478: "is_special",
+                 16: "is_helpless", 470: "is_ko_rebirth",
+                 181: "is_ko_rebirth", 182: "is_ko_rebirth",
+                 54: "is_damage", 62: "is_damage",
+                 505: "is_down", 511: "is_down"}
         names = list(gym_obs.FAMILY_FLAG_NAMES)
         for state, name in cases.items():
             f = {"x": 1.0, "action_state": state, "raw_flags": 1}
@@ -366,10 +370,20 @@ class TestObservation(unittest.TestCase):
             self.assertEqual(float(flags[names.index(name)]), 1.0, state)
             self.assertEqual(float(flags.sum()), 1.0, state)
         # curated but not a family: no flag
-        for state in (0, 2, 10, 22, 54):
+        for state in (0, 3, 10, 22, 72):
             f = {"x": 1.0, "action_state": state, "raw_flags": 1}
             obs = gym_obs.build_observation([f, {}])
             self.assertEqual(float(obs[gym_obs.SLICES["p1_family"]].sum()), 0.0)
+
+    def test_hitstun_comes_from_the_status_not_the_raw_field(self):
+        pos = [n for n, _d in gym_obs.SCALAR_FIELDS].index("hitstun")
+        for state, want in ((54, 1.0), (62, 1.0), (505, 1.0), (478, 0.0),
+                            (476, 0.0), (119, 0.0), (0, 0.0)):
+            # the raw field is wrong on purpose: up-B (478) used to read 1
+            f = {"x": 1.0, "action_state": state, "hitstun": 1 - int(want),
+                 "raw_flags": 1}
+            obs = gym_obs.build_observation([f, {}])
+            self.assertEqual(float(obs[pos]), want, state)
 
     def test_nonfinite_fields_are_sanitized(self):
         f = {"x": float("nan"), "y": float("inf"), "raw_flags": 1}
@@ -724,7 +738,8 @@ class TestReward(unittest.TestCase):
         cfg = gym_reward.RewardConfig(
             damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
             win_bonus=0.0, loss_penalty=0.0, recovery_weight=0.1,
-            recovery_ledge=True, stage_half_width=100.0, stage_top=0.0)
+            recovery_ledge=True, stage_half_width=100.0, stage_top=0.0,
+            ledge_y=0.0)
         deep = snap([fighter(x=130.0, y=-40.0, on_ground=0),
                      fighter(x=0.0, y=0.0, on_ground=1)])
         closer = snap([fighter(x=120.0, y=-30.0, on_ground=0),
@@ -749,32 +764,47 @@ class TestReward(unittest.TestCase):
             stage_top=0.0)
         on = snap([fighter(x=0.0, y=0.0, on_ground=1),
                    fighter(x=0.0, y=0.0, on_ground=1)])
-        # FALL_SPECIAL = 20: Up Special is used and the fighter is helpless.
-        doomed = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
-                               jumps_left=0, action_state=20),
-                       fighter(x=0.0, y=0.0, on_ground=1)])
-        # Default blast bottom -110: ramp is (60-10)/100 = 0.5.
+
+        def below(**kw):
+            base = dict(x=0.0, y=-60.0, on_ground=0, vy=-2.0, jumps_left=0)
+            base.update(kw)
+            return snap([fighter(**base), fighter(x=0.0, y=0.0, on_ground=1)])
+
+        # 16 = helpless fall after Up-B (verified): the ramp is (60-10)/100.
         self.assertAlmostEqual(
-            gym_reward.compute_reward(on, doomed, cfg), -0.05)
-        # No jumps but a normal fall (18) still has Up Special available.
-        normal_fall = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
-                                    jumps_left=0, action_state=18),
-                            fighter(x=0.0, y=0.0, on_ground=1)])
+            gym_reward.compute_reward(on, below(action_state=16), cfg), -0.05)
+        # A normal fall with no jumps (14) still has Up-B available.
         self.assertAlmostEqual(
-            gym_reward.compute_reward(on, normal_fall, cfg), 0.0)
-        # Currently using Up Special (36) is not helpless yet.
-        up_special = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=-2.0,
-                                   jumps_left=0, action_state=36),
-                           fighter(x=0.0, y=0.0, on_ground=1)])
+            gym_reward.compute_reward(on, below(action_state=14), cfg), 0.0)
+        # Currently in Up-B (478) is not helpless yet.
         self.assertAlmostEqual(
-            gym_reward.compute_reward(on, up_special, cfg), 0.0)
-        # Upward motion and being on stage disable it.
-        rising = snap([fighter(x=0.0, y=-60.0, on_ground=0, vy=1.0,
-                               action_state=20),
-                       fighter(x=0.0, y=0.0, on_ground=1)])
+            gym_reward.compute_reward(on, below(action_state=478), cfg), 0.0)
+        # The old, wrong ids (20/21) never trigger it.
         self.assertAlmostEqual(
-            gym_reward.compute_reward(on, rising, cfg), 0.0)
+            gym_reward.compute_reward(on, below(action_state=20), cfg), 0.0)
+        # Upward motion disables it; so does the ledge (hang = 119).
+        self.assertAlmostEqual(gym_reward.compute_reward(
+            on, below(action_state=16, vy=1.0), cfg), 0.0)
+        self.assertAlmostEqual(gym_reward.compute_reward(
+            on, below(action_state=119, y=-27.4), cfg), 0.0)
         self.assertAlmostEqual(gym_reward.compute_reward(on, on, cfg), 0.0)
+
+    def test_ledge_hang_is_safe_not_offstage(self):
+        cfg = gym_reward.RewardConfig(
+            damage_scale=0.0, ko_bonus=0.0, stock_loss=0.0,
+            win_bonus=0.0, loss_penalty=0.0, offstage_penalty=0.1,
+            recovery_weight=0.1, recovery_ledge=True)
+        on = snap([fighter(x=0.0, y=0.0, on_ground=1),
+                   fighter(x=0.0, y=0.0, on_ground=1)])
+        deep = snap([fighter(x=83.6, y=-60.0, on_ground=0, action_state=14),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        hang = snap([fighter(x=83.6, y=-27.44, on_ground=0, action_state=119),
+                     fighter(x=0.0, y=0.0, on_ground=1)])
+        # hanging at the ledge costs nothing ...
+        self.assertAlmostEqual(gym_reward.compute_reward(on, hang, cfg), 0.0)
+        # ... and reaching it from below pays the full remaining distance.
+        self.assertAlmostEqual(gym_reward.compute_reward(deep, hang, cfg),
+                               0.1 * (60.0 - 27.44) - 0.0, places=4)
 
     def test_rebirth_detects_stock_loss_when_stock_unreadable(self):
         cfg = gym_reward.RewardConfig(ko_bonus=1.0, stock_loss=-1.0,

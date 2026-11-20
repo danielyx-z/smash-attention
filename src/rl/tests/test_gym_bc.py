@@ -800,7 +800,8 @@ class GymObsCompatibilityTest(unittest.TestCase):
         # C's 32nd slot is OTHER for unknown/out-of-range states.
         raw = np.zeros((1, 2, len(bc.FIELDS)), np.float32)
         raw[0, 0, bc.FIELD_INDEX["x"]] = 1.0
-        for state, index in ((0, 0), (4, 3), (35, 21), (999, 31), (-5, 31)):
+        for state, index in ((0, 0), (10, 3), (16, 7), (119, 25), (470, 28),
+                             (478, 29), (4, 31), (35, 31), (999, 31), (-5, 31)):
             raw[0, 0, bc.FIELD_INDEX["action_state"]] = state
             obs = bc.obs_from_raw(raw)[0]
             self.assertEqual(int(np.argmax(obs[14:46])), index, state)

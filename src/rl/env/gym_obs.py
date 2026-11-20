@@ -37,6 +37,8 @@ from typing import Any, Sequence
 import numpy as np
 from gymnasium import spaces
 
+from rl.memory import status_kinds
+
 # --------------------------------------------------------------------------
 # layout
 # --------------------------------------------------------------------------
@@ -68,40 +70,44 @@ SCALAR_FIELDS: tuple[tuple[str, float], ...] = (
 )
 
 #: Curated action states: (name, game status kind) in one-hot order.
-#: The final (32nd) slot is OTHER.  Ids follow the status-kind table used by
-#: the state bridge (schema.ACTION_STATE_NAMES); unknown/new kinds land in OTHER.
+#: The final (32nd) slot is OTHER.  The ids are this build's real status kinds
+#: (see rl.memory.status_kinds): the recovery states (helpless fall, ledge,
+#: KO, respawn, Up-B) first, then the most frequent states of the DK
+#: recordings.  Only ids verified by a probe get a name; the rest are ``S<id>``
+#: because ``schema.ACTION_STATE_NAMES`` is wrong for most of them.  The old
+#: table covered 39 % of recorded frames; this one covers 80 %.
 CURATED_ACTION_STATES: tuple[tuple[str, int], ...] = (
     ("WAIT", 0),
-    ("WALK", 1),
-    ("RUN", 2),
-    ("TURN", 4),
-    ("DASH", 6),
+    ("S3", 3),
+    ("S7", 7),
     ("GUARD", 10),
-    ("JUMP_SQUAT", 11),
-    ("JUMP", 12),
-    ("JUMP_AERIAL", 13),
-    ("FALL", 18),
-    ("FALL_AERIAL", 19),
-    ("FALL_SPECIAL", 20),
-    ("ATTACK", 22),
-    ("ATTACK_DASH", 23),
-    ("ATTACK_S3", 24),
-    ("ATTACK_HI3", 25),
-    ("ATTACK_LW3", 26),
-    ("ATTACK_S4", 27),
-    ("ATTACK_HI4", 28),
-    ("ATTACK_LW4", 29),
-    ("ATTACK_AIR", 30),
-    ("SPECIAL_S", 35),
-    ("SPECIAL_HI", 36),
-    ("SPECIAL_LW", 37),
-    ("SPECIAL_N", 38),
-    ("THROW", 43),
+    ("S11", 11),
+    ("S12", 12),
+    ("S14", 14),
+    ("HELPLESS_FALL", 16),
+    ("S22", 22),
+    ("S24", 24),
+    ("S28", 28),
+    ("S32", 32),
+    ("S33", 33),
+    ("S34", 34),
+    ("S39", 39),
+    ("S41", 41),
+    ("S43", 43),
+    ("S44", 44),
+    ("S53", 53),
     ("DAMAGE", 54),
-    ("DAMAGE_FALL", 55),
-    ("DAMAGE_FLY", 56),
-    ("DOWN", 63),
-    ("CLIFF_WAIT", 74),
+    ("S72", 72),
+    ("S73", 73),
+    ("S79", 79),
+    ("LEDGE_CATCH_MOVE", 117),
+    ("LEDGE_CATCH", 118),
+    ("LEDGE_HANG", 119),
+    ("REBIRTH_DESCENT", 181),
+    ("REBIRTH_PLATFORM", 182),
+    ("KO", 470),
+    ("SPECIAL_HI", 478),
+    ("S505", 505),
 )
 
 ACTION_ONEHOT_SIZE = 32
@@ -125,24 +131,22 @@ RELATIVE_FIELDS: tuple[tuple[str, float], ...] = (
     ("facing_rel", 1.0),
 )
 
-#: Boolean families over the action status ids (``schema.ACTION_STATE_NAMES``),
+#: Boolean families over the real status ids (rl.memory.status_kinds),
 #: written after the relative block.  1.0 when the fighter's status belongs to
-#: the family, else 0.0.  The 32-entry one-hot has one bucket for everything
-#: else (OTHER); these keep the options a policy needs to see distinct:
-#: defensive rolls/dodges, techs, ledge options, grabs/throws, landing lag and
-#: a shield break.
+#: the family, else 0.0.  They keep the recovery-relevant distinctions visible
+#: even for ids that share the OTHER one-hot bucket.
 FAMILY_FLAGS: tuple[tuple[str, tuple[int, ...]], ...] = (
-    ("is_escape", (78, 79, 80)),                 # ESCAPE_F, ESCAPE_B, ESCAPE_AIR
-    ("is_tech", (71, 72)),                       # PASSIVE, PASSIVE_FB
-    ("is_ledge", (73, 74, 75, 76, 77)),          # CLIFF_CATCH/WAIT/CLIMB_*/ATTACK
-    ("is_catch", (43, 44, 45, 46, 47,              # THROW, THROW_F/B/HI/LW
-                  48, 49, 50, 51, 52, 53)),      # CATCH*, THROW_CATCH
-    ("is_landing", (84, 85, 86)),                # LANDING, LANDING_AIR, LANDING_FALL_SPECIAL
-    ("is_shieldbreak", (124, 125, 126, 127,      # SHIELD_BREAK_*
-                        128, 129, 130)),
+    ("is_ledge", tuple(sorted(status_kinds.LEDGE_KINDS))),       # 117-123
+    ("is_special", tuple(sorted(status_kinds.SPECIAL_KINDS))),   # 476-479
+    ("is_helpless", tuple(sorted(status_kinds.HELPLESS_KINDS))), # 16
+    ("is_ko_rebirth", (status_kinds.KO,
+                       *sorted(status_kinds.REBIRTH_KINDS))),    # 470, 181, 182
+    ("is_damage", tuple(sorted(status_kinds.DAMAGE_KINDS))),     # 54-62
+    ("is_down", tuple(sorted(status_kinds.DOWN_KINDS))),         # 505-511
 )
 FAMILY_FLAG_NAMES: tuple[str, ...] = tuple(name for name, _ids in FAMILY_FLAGS)
 
+_HITSTUN_POS = [n for n, _d in SCALAR_FIELDS].index("hitstun")
 PER_FIGHTER_SIZE = (len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE
                     + len(RELATIVE_FIELDS) + len(FAMILY_FLAGS))
 N_FIGHTERS = 2
@@ -249,6 +253,14 @@ def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray,
         else:
             out[pos] = value / scale if normalize else value
         pos += 1
+
+    # `hitstun` is recomputed from the status id so recordings made with the
+    # old reader (which flagged 476-479, the specials) agree with live frames.
+    try:
+        _st = int(fighter.get("action_state", -1))
+    except (TypeError, ValueError):
+        _st = -1
+    out[_HITSTUN_POS] = 1.0 if _st in status_kinds.HITSTUN_KINDS else 0.0
 
     out[pos:pos + ACTION_ONEHOT_SIZE] = _action_onehot(fighter.get("action_state", -1))
     pos += ACTION_ONEHOT_SIZE

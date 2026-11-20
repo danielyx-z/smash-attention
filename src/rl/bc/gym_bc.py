@@ -127,17 +127,17 @@ _LOCAL_RELATIVE = (
 )
 # same curated order as gym_obs.CURATED_ACTION_STATES (31 states + OTHER)
 _LOCAL_CURATED_STATES = (
-    0, 1, 2, 4, 6, 9, 11, 12, 13, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28,
-    29, 30, 35, 36, 37, 38, 43, 54, 55, 56, 63, 74,
+    0, 3, 7, 10, 11, 12, 14, 16, 22, 24, 28, 32, 33, 34, 39, 41, 43, 44, 53,
+    54, 72, 73, 79, 117, 118, 119, 181, 182, 470, 478, 505,
 )
-# same families as gym_obs.FAMILY_FLAGS (status ids from schema.ACTION_STATE_NAMES)
+# same families as gym_obs.FAMILY_FLAGS (real status ids, rl.memory.status_kinds)
 _LOCAL_FAMILIES = (
-    ("is_escape", (78, 79, 80)),
-    ("is_tech", (71, 72)),
-    ("is_ledge", (73, 74, 75, 76, 77)),
-    ("is_catch", (43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53)),
-    ("is_landing", (84, 85, 86)),
-    ("is_shieldbreak", (124, 125, 126, 127, 128, 129, 130)),
+    ("is_ledge", (117, 118, 119, 120, 121, 122, 123)),
+    ("is_special", (476, 477, 478, 479)),
+    ("is_helpless", (16,)),
+    ("is_ko_rebirth", (470, 181, 182)),
+    ("is_damage", (54, 55, 56, 57, 58, 59, 60, 61, 62)),
+    ("is_down", (505, 506, 507, 508, 509, 510, 511)),
 )
 try:  # Agent C's module is the source of truth when it is importable.
     from rl.env import gym_obs as _gym_obs  # type: ignore
@@ -167,6 +167,9 @@ for _i, _state in enumerate(CURATED_ACTION_STATES):
 del _i, _state
 
 _ONEHOT_SLICE = slice(14, 14 + ACTION_ONEHOT_SIZE)
+_HITSTUN_POS = [n for n, _d in SCALAR_FIELDS].index("hitstun")
+_HITSTUN_IDS = np.array(sorted(set(range(54, 63)) | set(range(505, 512))),
+                        dtype=np.int64)
 _DX = 46
 _DY = 47
 _DIST = 48
@@ -360,6 +363,9 @@ def obs_from_raw(raw, normalize: bool = False,
         state_ok = np.isfinite(state_vals) & (np.abs(state_vals) <= OBS_LIMIT)
         # Missing/absurd states are OTHER, not WAIT (0).
         states = np.where(state_ok, state_vals, -1).astype(np.int64)
+        # recomputed from the status id: old recordings flagged 476-479 (the
+        # specials) as hitstun
+        b[..., _HITSTUN_POS] = np.isin(states, _HITSTUN_IDS).astype(np.float32)
         idx = np.full(states.shape, OTHER_INDEX, dtype=np.int64)
         in_range = (states >= 0) & (states < len(_STATE_LOOKUP))
         idx[in_range] = _STATE_LOOKUP[states[in_range]]

@@ -36,10 +36,13 @@ from typing import Any, Sequence
 
 DEFAULT_EGO_SLOT = 0
 
-#: Action states where the fighter has already used Up Special and is in the
-#: helpless special-fall state: no jump, no attack, only ledge/ground/hit can
-#: save them.  (schema.ACTION_STATE_NAMES: FALL_SPECIAL, FALL_SPECIAL_AERIAL.)
-HELPLESS_ACTION_STATES = frozenset({20, 21})
+from rl.memory import status_kinds
+
+#: Real status kinds for this build (rl.memory.status_kinds).  The schema's
+#: old FALL_SPECIAL ids (20/21) never occur; the helpless fall after Up-B is 16
+#: and the ledge catch/hang/getup states are 117-123.
+HELPLESS_ACTION_STATES = status_kinds.HELPLESS_KINDS
+LEDGE_ACTION_STATES = status_kinds.LEDGE_KINDS
 
 
 @dataclass(frozen=True)
@@ -80,8 +83,11 @@ class RewardConfig:
     #: jumps.  Ramps toward the blast bottom so a doomed fall is paid for
     #: before the respawn `-5` arrives.
     doomed_penalty: float = 0.0
-    stage_half_width: float = 100.0
+    #: Measured on Final Destination: the ledge hang point is x = +-83.6,
+    #: y = -27.44 relative to the stage surface (y = 0).
+    stage_half_width: float = status_kinds.LEDGE_X
     stage_top: float = 0.0
+    ledge_y: float = status_kinds.LEDGE_Y
 
     def as_dict(self) -> dict:
         return {
@@ -102,6 +108,7 @@ class RewardConfig:
             "doomed_penalty": self.doomed_penalty,
             "stage_half_width": self.stage_half_width,
             "stage_top": self.stage_top,
+            "ledge_y": self.ledge_y,
         }
 
 
@@ -155,6 +162,14 @@ def _rebirth(fighter: dict) -> bool:
         return False
 
 
+def _on_ledge(fighter: dict) -> bool:
+    """Catching, hanging on, or climbing out of the ledge: safe."""
+    try:
+        return int(fighter.get("action_state", -1)) in LEDGE_ACTION_STATES
+    except (TypeError, ValueError):
+        return False
+
+
 def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
     """0..1 danger factor for falling *below* the stage.
 
@@ -162,7 +177,7 @@ def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
     at the side is legitimate).  The penalty ramps in only once the fighter is
     below the stage surface, and maxes out well below it.
     """
-    if _rebirth(fighter):
+    if _rebirth(fighter) or _on_ledge(fighter):
         return 0.0
     try:
         airborne = int(fighter.get("on_ground", 0)) == 0
@@ -176,13 +191,13 @@ def _edge_danger(fighter: dict, cfg: "RewardConfig") -> float:
 
 
 def _recovery_distance(fighter: dict, cfg: "RewardConfig") -> float:
-    """Recovery distance: vertical depth, or 2-D distance to the nearest ledge.
+    """Recovery distance: vertical depth, or 2-D distance to the ledge hang point.
 
-    Both are 0 while on stage or on the revival platform.  The ledge variant
-    pays for moving up *and* toward a ledge, which is what a real recovery
-    needs; the depth variant is kept for older checkpoints.
+    Both are 0 while on stage, on the revival platform, or on the ledge.  The
+    ledge variant pays for moving up *and* toward a ledge; reaching the hang
+    point (x = +-83.6, y = -27.4) is the goal, so it ends at distance 0.
     """
-    if _rebirth(fighter):
+    if _rebirth(fighter) or _on_ledge(fighter):
         return 0.0
     try:
         if int(fighter.get("on_ground", 0)) == 1:
@@ -196,8 +211,8 @@ def _recovery_distance(fighter: dict, cfg: "RewardConfig") -> float:
             return 0.0
         x = _number(fighter, "x")
         half = float(cfg.stage_half_width)
-        return min(math.hypot(x + half, y - top),
-                   math.hypot(x - half, y - top))
+        ly = float(cfg.ledge_y)
+        return min(math.hypot(x + half, y - ly), math.hypot(x - half, y - ly))
     return max(0.0, (top - 10.0) - y)
 
 
@@ -211,7 +226,7 @@ def _doomed_danger(curr: Any, fighter: dict, cfg: "RewardConfig") -> float:
     the stage to the live blast bottom (falling back to ``stage_top - 110``
     when the snapshot does not carry a blast zone).
     """
-    if _rebirth(fighter):
+    if _rebirth(fighter) or _on_ledge(fighter):
         return 0.0
     try:
         if int(fighter.get("on_ground", 0)) == 1:

@@ -299,7 +299,11 @@ def describe() -> str:
 if __name__ == "__main__":
     print(describe())
 
-# ---- action_state human-readable names (Mario/common) -------------------
+# ---- action_state human-readable names ------------------------------------
+# WARNING: this table came from an older numbering and is WRONG for most ids
+# (an "aerial attack" id sits on the ground, the ledge ids read as items, the
+# specials read as tumble).  Only the ids overlaid by VERIFIED_STATUS_NAMES
+# below are trustworthy; see status_kinds.py.  Do not name a state from here.
 ACTION_STATE_NAMES = {
     0:  "WAIT",
     1:  "WALK",
@@ -581,6 +585,17 @@ ACTION_STATE_NAMES = {
     510: "DOWN_FALL_SCREEN",
     511: "DOWN_FALL_STAGE",
 }
+
+#: Names verified by live probes and the DK recordings (status_kinds.py).
+VERIFIED_STATUS_NAMES = {
+    0: "WAIT", 10: "GUARD", 16: "HELPLESS_FALL", 54: "DAMAGE",
+    117: "LEDGE_CATCH_MOVE", 118: "LEDGE_CATCH", 119: "LEDGE_HANG",
+    120: "LEDGE_EXIT_120", 121: "LEDGE_EXIT_121", 122: "LEDGE_EXIT_122",
+    123: "LEDGE_EXIT_123", 181: "REBIRTH_DESCENT", 182: "REBIRTH_PLATFORM",
+    470: "KO", 476: "SPECIAL_476", 477: "SPECIAL_477", 478: "SPECIAL_HI",
+    479: "SPECIAL_479",
+}
+ACTION_STATE_NAMES.update(VERIFIED_STATUS_NAMES)
 
 def action_state_name(state: int) -> str:
     return ACTION_STATE_NAMES.get(state, f"UNKNOWN({state})")

@@ -161,11 +161,11 @@ SITUATION_GROUND = 0
 # hitstun has 2, tumble/KO 0.
 ACTIONABLE_TERM_MIN = 4
 
-#: Status kinds of a damage reaction (hitstun).  These are the game's own
-#: DAMAGE/DAMAGE_FLY/TUMBLE/DOWN_FALL kinds; `hitstun` is 1 while in one.
-DAMAGE_STATUS_KINDS = frozenset(
-    set(range(54, 63)) | {476, 477, 478, 479} | set(range(505, 512))
-)
+#: Status kinds of a damage reaction (hitstun): DAMAGE* (54-62) and the
+#: knocked-down family (505-511).  476-479 used to be listed here as "tumble",
+#: but they are the special moves (478 is Up-B), so `hitstun` read 1 during
+#: every special; see status_kinds.py.
+DAMAGE_STATUS_KINDS = frozenset(set(range(54, 63)) | set(range(505, 512)))
 
 #: Status kinds of a held shield.  Confirmed live at 60 Hz by watching the
 #: derived field against the game's own status kind: whenever the fighter is

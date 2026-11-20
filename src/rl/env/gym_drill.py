@@ -27,6 +27,8 @@ from typing import Any
 
 import numpy as np
 
+from rl.memory import status_kinds
+
 EGO_SLOT = 0
 
 
@@ -55,10 +57,15 @@ def _flag(fighter: dict, key: str) -> bool:
         return False
 
 
+def on_ledge(fighter: dict) -> bool:
+    """Catching, hanging on, or climbing out of the ledge (safe)."""
+    return status_kinds.is_ledge(fighter.get("action_state", -1))
+
+
 def is_offstage(info: dict, slot: int = EGO_SLOT) -> bool:
-    """Airborne below the stage, not on the revival platform."""
+    """Airborne below the stage, not on the revival platform or the ledge."""
     fighter = _ego(info, slot)
-    if not fighter or _flag(fighter, "is_on_rebirth"):
+    if not fighter or _flag(fighter, "is_on_rebirth") or on_ledge(fighter):
         return False
     if _flag(fighter, "on_ground"):
         return False
@@ -264,7 +271,7 @@ class RecoveryDrillEnv:
             # The environment already paid the stock/death reward.
             terminated = True
         elif (self._was_offstage and not rebirth
-              and _flag(fighter, "on_ground")):
+              and (_flag(fighter, "on_ground") or on_ledge(fighter))):
             self._ground_steps += 1
             if self._ground_steps >= self.settle_steps:
                 reward += self.recovery_bonus

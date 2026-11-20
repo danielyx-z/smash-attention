@@ -144,12 +144,14 @@ class DeathAutopsyTest(unittest.TestCase):
         return base
 
     def test_helpless_fall_is_labelled(self):
-        hist = [self.snap(), self.snap(y=-30.0, ground=0, state=36),
-                self.snap(y=-80.0, ground=0, state=20, jumps=0)]
+        hist = [self.snap(), self.snap(y=-30.0, ground=0, state=478),
+                self.snap(y=-80.0, ground=0, state=16, jumps=0)]
         d = ppo.classify_death(hist)
         self.assertEqual(d["cause"], "helpless")
         self.assertEqual(d["fall_steps"], 2)
         self.assertTrue(d["helpless"])
+        self.assertTrue(d["upb_used"])
+        self.assertFalse(d["ledge_grabbed"])
 
     def test_blast_zone_and_unrecovered_fall(self):
         side = ppo.classify_death([self.snap(), self.snap(x=170.0, y=10.0,
