@@ -184,6 +184,7 @@ OBS_PER_FIGHTER = (len(SCALAR_FIELDS) + ACTION_ONEHOT_SIZE
                    + len(RELATIVE_FIELDS) + len(FAMILY_FLAGS))
 OBS_DIM = 2 * OBS_PER_FIGHTER
 OBS_LIMIT = 1.0e6
+VELOCITY_LIMIT = 3000.0     # same as gym_obs: garbage respawn-frame velocities -> 0
 # Fields negated by a horizontal mirror (per fighter block).
 _MIRROR_NEG = (0, 2, 5, _DX)   # x, vx, facing, dx
 MIRROR_BUTTONS = (BUTTON_INDEX["DPAD_L"], BUTTON_INDEX["DPAD_R"])
@@ -357,6 +358,8 @@ def obs_from_raw(raw, normalize: bool = False,
         pos = 0
         for name, scale in SCALAR_FIELDS:
             value = sane(vals[..., FIELD_INDEX[name]])
+            if name in ("vx", "vy"):
+                value = np.where(np.abs(value) > VELOCITY_LIMIT, 0.0, value)
             if name == "damage" and damage_mode != "raw":
                 if damage_mode == "bucket":
                     b[..., pos] = damage_bucket(value)

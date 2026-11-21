@@ -1030,6 +1030,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-loss-weight", type=float, default=1.0,
                     help="per-sample PPO loss multiplier on offstage states "
                          "(1 = uniform; e.g. 3)")
+    ap.add_argument("--pause-guard-steps", type=int, default=40,
+                    help="press PLUS when no fighter field changed for this "
+                         "many steps (a paused match); 0 = off")
     ap.add_argument("--restart-every", type=int, default=0,
                     help="restart the game every N iterations, keeping the "
                          "optimizer (prevention for the runtime wedge; 0=off)")
@@ -1209,6 +1212,13 @@ def main(argv: list[str] | None = None) -> int:
                                       speed=game_speed):
                     log("[ppo] giving up: no fight")
                     return 2
+        if int(args.pause_guard_steps) > 0 and not args.mock \
+                and pad is not None:
+            from rl.env.gym_pause import PauseGuardEnv
+            env = PauseGuardEnv(env, freeze_steps=int(args.pause_guard_steps),
+                                log=log)
+            log(f"[ppo] pause guard: PLUS after {args.pause_guard_steps} "
+                "frozen steps")
         if int(args.ledge_timeout) > 0 and not args.mock:
             from rl.env.gym_ledge import LedgeTimeoutEnv
             env = LedgeTimeoutEnv(env, max_hang=int(args.ledge_timeout),

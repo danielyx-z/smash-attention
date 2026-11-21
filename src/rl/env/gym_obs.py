@@ -153,6 +153,10 @@ OBS_DTYPE = np.float32
 #: Safety clamp so a torn/garbage frame can never leave the Box.  Raw SSBU
 #: coordinates are |x|,|y| < 1e4 and derived velocities far below this.
 OBS_LIMIT = 1.0e6
+#: Velocities are units/second.  Real values peak near 1500 (first frame of
+#: strong knockback); the first frame of the respawn platform carries garbage
+#: of +-10000..18000, which is read as 0.
+VELOCITY_LIMIT = 3000.0
 
 _ACTION_NAMES = tuple(name for name, _id in CURATED_ACTION_STATES) + ("OTHER",)
 
@@ -244,6 +248,8 @@ def _fighter_vector(fighter: dict, normalize: bool, out: np.ndarray,
     pos = 0
     for name, scale in SCALAR_FIELDS:
         value = _number(fighter.get(name, 0.0))
+        if name in ("vx", "vy") and abs(value) > VELOCITY_LIMIT:
+            value = 0.0
         if name == "damage" and damage_mode != "raw":
             if damage_mode == "bucket":
                 out[pos] = damage_bucket(value)

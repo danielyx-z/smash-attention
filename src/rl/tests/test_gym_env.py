@@ -1363,3 +1363,107 @@ class DeadPadTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             env.reset(seed=1)                # second in a row: escalate
         self.assertIn("unresponsive", str(ctx.exception))
+
+
+class _PausableEnv:
+    """Frozen (identical frames) until PLUS is pressed an odd number of times."""
+
+    max_steps = 1000
+    ego_slot = 0
+
+    def __init__(self, paused=True):
+        self.paused = paused
+        self.t = 0
+        self.plus = 0
+
+    def reset(self, seed=None):
+        return np.zeros(8, np.float32), self._info()
+
+    def _info(self):
+        fr = 0 if self.paused else self.t
+        return {"fight_on": 1, "raw_fighters": [
+            {"action_state": 0, "action_frame": float(fr), "x": 1.0,
+             "y": 0.0, "damage": 0.0},
+            {"action_state": 0, "action_frame": float(fr), "x": -1.0,
+             "y": 0.0, "damage": 0.0}]}
+
+    def step(self, action):
+        if float(action["buttons"][8]) > 0.5:
+            self.plus += 1
+            self.paused = not self.paused
+        if not self.paused:
+            self.t += 1
+        return np.zeros(8, np.float32), 0.0, False, False, self._info()
+
+
+class PauseGuardTest(unittest.TestCase):
+    def _idle(self):
+        return {"buttons": np.zeros(12, np.float32),
+                "stick": np.zeros(2, np.float32),
+                "cstick": np.zeros(2, np.float32), "trigger": 0.0}
+
+    def test_resumes_a_paused_match(self):
+        from rl.env.gym_pause import PauseGuardEnv
+        env = PauseGuardEnv(_PausableEnv(paused=True), freeze_steps=5)
+        env.reset()
+        flagged = False
+        for _ in range(12):
+            *_x, info = env.step(self._idle())
+            flagged = flagged or bool(info.get("pause_resumed"))
+        self.assertTrue(flagged)
+        self.assertFalse(env.env.paused)
+        self.assertEqual(env.resumed, 1)
+
+    def test_never_presses_plus_in_a_running_match(self):
+        from rl.env.gym_pause import PauseGuardEnv
+        env = PauseGuardEnv(_PausableEnv(paused=False), freeze_steps=5)
+        env.reset()
+        for _ in range(60):
+            env.step(self._idle())
+        self.assertEqual(env.env.plus, 0)
+
+    def test_unrecoverable_freeze_truncates(self):
+        from rl.env.gym_pause import PauseGuardEnv
+
+        class Dead(_PausableEnv):
+            def step(self, action):          # PLUS does nothing
+                return (np.zeros(8, np.float32), 0.0, False, False,
+                        self._info())
+
+        env = PauseGuardEnv(Dead(paused=True), freeze_steps=4, attempts=2)
+        env.reset()
+        out = None
+        for _ in range(10):
+            out = env.step(self._idle())
+            if out[3]:
+                break
+        self.assertTrue(out[3])                  # truncated
+        self.assertTrue(out[4].get("frozen_wedge"))
+
+
+class VelocityGarbageTest(unittest.TestCase):
+    def test_respawn_frame_garbage_velocity_is_zeroed_in_both_builders(self):
+        from rl.bc import gym_bc as bc
+        from rl.env import gym_obs
+        fighter = {k: 0.0 for k in bc.FIELDS}
+        fighter.update(entry_id=0, kind=1, x=0.0, y=150.0, vx=-9337.0,
+                       vy=18059.0, action_state=182, raw_flags=1)
+        raw = np.zeros((2, len(bc.FIELDS)), np.float32)
+        for i, k in enumerate(bc.FIELDS):
+            raw[0, i] = fighter[k]
+        live = gym_obs.PolicyObservation().build_from_fighters(
+            [fighter, {}]) if hasattr(gym_obs.PolicyObservation,
+                                      "build_from_fighters") else None
+        offline = bc.obs_from_raw(raw[None], normalize=False)[0]
+        self.assertEqual(float(offline[2]), 0.0)         # vx
+        self.assertEqual(float(offline[3]), 0.0)         # vy
+        if live is not None:
+            self.assertEqual(float(live[2]), 0.0)
+            self.assertEqual(float(live[3]), 0.0)
+
+    def test_real_knockback_speed_is_kept(self):
+        from rl.bc import gym_bc as bc
+        raw = np.zeros((2, len(bc.FIELDS)), np.float32)
+        raw[0, bc.FIELD_INDEX["vy"]] = 1487.0
+        raw[0, bc.FIELD_INDEX["raw_flags"]] = 1
+        self.assertAlmostEqual(float(bc.obs_from_raw(raw[None])[0][3]), 1487.0)
