@@ -879,7 +879,24 @@ def restart_game(env, pad, args, log):
 
 
 def recover_pad(env, pad, args, log) -> Any:
-    """Recreate the virtual pad after P1 input stalls, without rebooting the game."""
+    """Recover from stalled P1 input.
+
+    A pad recreated in the middle of a match connects (it can even press
+    PLUS) but is not bound to P1: its stick and buttons do nothing, so it
+    cannot repair a stalled match (found by audit; this is why "pad
+    recovered" runs stayed frozen).  The game is restarted instead; the
+    in-place recreation below is only the fallback for runs not launched
+    through live_rl.sh (no SSBU_LIVE_MATCH to relaunch with).
+    """
+    if os.environ.get("SSBU_LIVE_MATCH"):
+        log("[ppo] a pad recreated mid-match does not control P1; "
+            "restarting the game instead")
+        return restart_game(env, pad, args, log)
+    return _recover_pad_in_place(env, pad, args, log)
+
+
+def _recover_pad_in_place(env, pad, args, log) -> Any:
+    """Recreate the virtual pad without rebooting the game (fallback)."""
     from rl.input.gym_input import VirtualPad
     try:
         pad.destroy()

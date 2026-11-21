@@ -2176,3 +2176,53 @@ Consequences fixed on top of the earlier ones:
 observed live, or if the reader, observation, BC fallback tables and reward
 disagree.  `verify_live_state.py` still uses the old name-based sets and is
 superseded by the scenario suite.
+
+## 2026-11-21 State audit: pause freeze, frame jitter, reset leakage, lockstep
+
+Method: live captures (`scripts/audit_capture.py`, 9,852 steps), a timing audit
+(`audit_timing.py`), a reset audit, and `audit_lockstep.py` (A exactness,
+B determinism, C stall invariance, D input latency).  Run each audit on a
+**fresh game launch**: a pad created mid-match is not bound to P1.
+
+* **Paused match = valid-looking frozen frames.**  A controller
+  disconnect/reconnect pauses the match; the window keeps rendering, the reader
+  keeps publishing, resets are acknowledged, every observation is a valid
+  identical frame.  Two 4x runs trained 25-35 iterations on it (reward 0,
+  "P1 did not leave the stage").  PLUS resumes it.  `PauseGuardEnv` detects 40
+  frozen steps and presses PLUS (0 false activations in 900 steps of play).
+* **A pad recreated mid-match does not control P1** (connects, can press PLUS,
+  stick/buttons do nothing).  `recover_pad` therefore never repaired anything;
+  it now restarts the game.
+* **Observations were not tied to game frames.**  The reader samples memory on a
+  wall-clock timer and numbers samples with its own counter.  Measured with the
+  fighter's status frame: 1x 77% exactly one frame apart, 8% duplicate, 3%
+  skipped; 4x 52% / 41% / 7%.  A "2-frame" decision averaged 1.3 real frames at
+  4x.  **Fix: lockstep** (`SSBU_GATE=1`, `/dev/shm/ssbu_gate.bin`): the runtime
+  parks the game thread on a frame boundary (hook: `debug_mode_frame`, once per
+  presented frame); the reader publishes one consistent sample per parked frame
+  tagged with its frame number; `env.step` advances exactly `frame_skip` frames.
+  Live: 240/240 steps exactly 2 frames; jump pressed -> jump-squat on the same
+  step; P1's trace identical across resets and across 1.5 s stalls.
+  `live_rl.sh --lockstep` (needs speed != 1; defaults to 4).
+* **Reset leaked state.**  The rematch keeps the fighters' status and facing and
+  the pad keeps the last action: an episode could start mid-special, facing away,
+  stick held.  Runtime reset now queues a WAIT status (`change_status_request`;
+  the `_force` variant froze the fighters, and calling it after the speed clear
+  left garbage velocities), restores facing, and the env releases the pad first.
+  Lockstep reset parks at reset frame + K inside the runtime and can re-seed the
+  RNG there; the env then advances frame by frame to a clean start (ego on the
+  ground, actionable, not on the revival platform) and presses PLUS if the
+  fighters show no motion.
+* **Garbage velocity** on the first frame of a new status (respawn: +-10000,
+  18000 u/s; also +-2..5000 with identical positions).  Both observation
+  builders read |v| > 3000 as 0 (real knockback peaks ~1500).
+* Checked and correct: slot identity, dx/dy/facing_rel (0 errors in 19,704
+  readings), dist_to_blast (with the per-row blast zone, which shrinks near the
+  end of a match), damage, jumps_left, on_ground, action_frame.
+* Known weak spots: `stock` reads -1 ~93% of the time (not in the model input);
+  `is_actionable` is ~1 in status 73 (a hit state; hitstun is derived from the
+  status id instead); the CPU AI keeps internal state across rematches, so its
+  play differs between episodes even with the same seed.
+* Runtime change is local to `ssbu-recomp/runtime/debug_mode.c` (not pushed);
+  built with `rl-host-link debug_mode.c` (1 file, ~1 s; the game library is not
+  touched).
