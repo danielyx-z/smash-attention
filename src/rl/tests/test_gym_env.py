@@ -1016,12 +1016,28 @@ class TestEnv(EnvCase):
             self.assertEqual(info["seq_delta"] % 2, 0)
             self.assertGreaterEqual(info["age_ns"], 0)
         self.assertEqual(env.step_count, 100)
-        self.assertEqual(len(self.adapter.calls), 100)
+        # 100 steps + the one neutral action reset() sends to release held inputs
+        self.assertEqual(len(self.adapter.calls), 101)
         self.assertLess(time.monotonic() - t0, 20.0)
+
+    def test_reset_releases_held_inputs_first(self):
+        env = self.make_env()
+        env.reset()
+        held = {"buttons": np.zeros(12, np.int8), "stick": np.zeros(2, np.float32),
+                "cstick": np.zeros(2, np.float32)}
+        held["buttons"][0] = 1
+        held["stick"][:] = [1.0, 0.0]
+        env.step(held)
+        n = len(self.adapter.calls)
+        env.reset()
+        first = self.adapter.calls[n]               # the first thing reset() sent
+        self.assertEqual(first["buttons_mask"], 0)
+        np.testing.assert_allclose(first["stick"], [0.0, 0.0])
 
     def test_action_reaches_adapter(self):
         env = self.make_env()
         env.reset()
+        self.adapter.calls.clear()                # reset() sent a neutral action
         action = {
             "buttons": np.zeros(12, np.int8),
             "stick": np.zeros(2, np.float32),
@@ -1307,7 +1323,7 @@ class TestEnv(EnvCase):
             env.reset()
             self.assertEqual(len(resets), 1)
             env.step(gym_action.neutral_action())
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 2)      # reset's neutral release + the step
             self.assertEqual(calls[0]["buttons"].shape, (12,))
             _, _, _, _, info = env.step(gym_action.neutral_action())
             self.assertEqual(info["input_adapter"], "module.apply_action")

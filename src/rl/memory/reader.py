@@ -131,6 +131,36 @@ class FpsMeter:
         return (len(self.stamps) - 1) / span if span > 0 else 0.0
 
 
+def gated_sample(gate, state: dict, read, publish) -> bool:
+    """One lockstep poll.  Returns True when it handled the iteration.
+
+    While the runtime parks the game at frame F (gate enabled), read the game
+    memory once, check that the game was still parked at F afterwards (so the
+    sample is one consistent frame) and publish it tagged F.  One publish per
+    parked frame.  Returns False when the gate is off: the caller then runs
+    the timer-driven path.
+    """
+    st = gate.read()
+    state["published"] = False
+    if st.epoch != state.get("epoch"):
+        state["epoch"], state["last"] = st.epoch, None
+    if not st.enable:
+        state["last"] = None
+        return False
+    if not st.parked or st.blocked == state.get("last"):
+        time.sleep(0.0002)
+        return True
+    tag = st.blocked
+    data = read()
+    st2 = gate.read()
+    if not (st2.enable and st2.parked and st2.blocked == tag):
+        return True                           # the game moved during the read
+    publish(tag, data)
+    state["last"] = tag
+    state["published"] = True
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pid", type=int, help="game pid (default: first ssbu_native)")
@@ -172,6 +202,11 @@ def main() -> int:
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
 
+    from rl.input.gate import FrameGate, GateError
+    gate = None
+    gate_checked = 0.0
+    gate_state: dict = {}       # lockstep bookkeeping (see gated_sample)
+
     period = 1.0 / args.fps
     start = time.perf_counter()
     next_at = start
@@ -186,6 +221,44 @@ def main() -> int:
             if t_end and now >= t_end:
                 break
 
+            # lockstep: while the runtime parks the game at a frame boundary,
+            # publish exactly one consistent sample per parked frame, tagged
+            # with that frame number (header game_frame).  Otherwise the
+            # timer-driven path below runs as before.
+            if gate is None and now - gate_checked > 0.5:
+                gate_checked = now
+                try:
+                    gate = FrameGate().open()
+                except GateError:
+                    gate = None
+            if gate is not None:
+                def _read():
+                    return gs.read_fighters()
+
+                def _publish(tag, data):
+                    fight_, rows_, ms_ = data
+                    hflags_ = 0
+                    if gs.last_stage_id is not None:
+                        hflags_ |= schema.HEADER_FLAG_STAGE_ID
+                    if gs.control_layout is not None:
+                        hflags_ |= schema.HEADER_FLAG_CONTROL_LAYOUT
+                    pub.publish(fight_, rows_, ms_,
+                                time.clock_gettime_ns(time.CLOCK_MONOTONIC),
+                                last_fps, gs.last_bounds,
+                                stage_id=gs.last_stage_id, game_frame=tag,
+                                flags=hflags_)
+
+                try:
+                    handled = gated_sample(gate, gate_state, _read, _publish)
+                except Exception as exc:      # noqa: BLE001
+                    print(f"read error (retrying): {type(exc).__name__}: {exc}", flush=True)
+                    time.sleep(0.001)
+                    continue
+                if handled:
+                    if gate_state.get("published"):
+                        frames += 1
+                        next_at = time.perf_counter()
+                    continue
             try:
                 fight, rows, ms = gs.read_fighters()
             except Exception as exc:          # a torn-down match must not kill the daemon

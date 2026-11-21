@@ -697,6 +697,14 @@ class SSBUGymEnv(gym.Env):
 
         self.reader = RawSnapshotReader(self.shm_path, timeout=self.reader_timeout)
 
+        # lockstep (see rl.input.gate): the game is parked between decisions
+        # and every step advances exactly ``frame_skip`` game frames.
+        self._gate = None
+        self._lockstep = False
+        self._lock_reset = None
+        self._lock_seed = None
+        self._lock_park = 1
+
         self._input_adapter = None
         self._input_error: str | None = None
         self._input_resolved = False
@@ -862,6 +870,163 @@ class SSBUGymEnv(gym.Env):
                 return False
         return True
 
+    def _neutralise_input(self) -> None:
+        """Release every button and the sticks before a reset.
+
+        The pad keeps the last action it was given, so an episode that ended
+        mid-run used to start the next one with the stick still held.
+        """
+        try:
+            adapter = self._get_input_adapter()
+            adapter.apply(gym_action.decode_action(
+                {"buttons": np.zeros(gym_action.N_BUTTONS, np.int8),
+                 "stick": np.zeros(2), "cstick": np.zeros(2)}))
+        except Exception as exc:                  # noqa: BLE001
+            self._input_error = f"neutralise before reset failed: {exc}"
+
+    # -- lockstep ---------------------------------------------------------
+    def enable_lockstep(self, timeout: float = 10.0, seed: int | None = None,
+                        park_after: int = 1,
+                        gate_path: str | None = None) -> None:
+        """Switch to frame-exact stepping.
+
+        Needs the game started with ``SSBU_GATE=1`` and ``SSBU_SPEED != 1`` and
+        the reader running.  The gate is released here; the next ``reset()``
+        parks the game on a frame boundary and every ``step()`` then advances
+        exactly ``frame_skip`` frames.
+        """
+        from rl.input.gate import FrameGate
+        from rl.input.gym_reset import ResetClient
+        self._gate = (FrameGate(gate_path) if gate_path else FrameGate()).open(timeout)
+        self._gate.release()
+        # protocol-only reset client: request + ack, no wait on the free-running
+        # state stream (the game is parked after the reset, so it has none)
+        self._lock_reset = ResetClient(timeout=self.reset_timeout,
+                                       state_reader=None)
+        self._lock_seed = seed
+        self._lock_park = int(park_after)
+        self._lockstep = True
+
+    @property
+    def lockstep(self) -> bool:
+        return self._lockstep
+
+    def _wait_tagged(self, frame: int, timeout: float | None = None) -> RawSnapshot:
+        """Wait for the snapshot the reader tagged with game frame ``frame``."""
+        limit = self.frame_timeout if timeout is None else float(timeout)
+        deadline = time.monotonic() + limit
+        want = int(frame) & 0xFFFFFFFF
+        while True:
+            snap = self.reader.read_latest(
+                timeout=max(0.001, deadline - time.monotonic()))
+            if int(snap.game_frame) == want:
+                return snap
+            if time.monotonic() >= deadline:
+                gs = self._gate.read() if self._gate is not None else None
+                raise SnapshotTimeout(
+                    f"no snapshot tagged game frame {want} within "
+                    f"{limit:.1f}s (latest tag {snap.game_frame}, gate {gs}); "
+                    "is the reader running and the game started with "
+                    "SSBU_GATE=1?")
+            time.sleep(0.0002)
+
+    def _press_plus_once(self) -> None:
+        """Tap PLUS (pause toggle) for two frames, then release."""
+        adapter = self._get_input_adapter()
+        buttons = np.zeros(gym_action.N_BUTTONS, np.int8)
+        buttons[gym_action.BUTTONS.index("PLUS")] = 1
+        adapter.apply(gym_action.decode_action(
+            {"buttons": buttons, "stick": np.zeros(2), "cstick": np.zeros(2)}))
+        self._wait_tagged(self._gate.advance(2), timeout=self.reset_timeout)
+        self._neutralise_input()
+
+    def _clean_start(self, snap: RawSnapshot) -> bool:
+        """Is this a state an episode can sensibly start from?
+
+        The rematch keeps a fighter's action status, so a reset right after a
+        KO can hand back a fighter that is still falling or standing on the
+        revival platform.  Wait (deterministically, frame by frame) until the
+        ego is on the ground, actionable and not on the platform, and the
+        opponent is not on it either.
+        """
+        fighters = snap.fighters
+        if len(fighters) <= max(self.ego_slot, 1):
+            return False
+        ego = fighters[self.ego_slot]
+        opp = fighters[1 - self.ego_slot]
+        return (int(ego.get("on_ground", 0)) == 1
+                and int(ego.get("is_actionable", 0)) == 1
+                and int(ego.get("is_on_rebirth", 0)) == 0
+                and int(opp.get("is_on_rebirth", 0)) == 0)
+
+    def _reset_lockstep(self, t0: float):
+        """Reset with the game parked on deterministic frames.
+
+        The runtime performs the rematch, re-seeds the RNG (if a seed was
+        given) and parks at reset frame + ``park_after`` itself.  The env then
+        advances one frame at a time until the fight is live, so the first
+        observation of every episode is the same frame of the same state,
+        whatever the wall clock did.
+        """
+        gate = self._gate
+        gate.release()                          # the rematch needs a running game
+        gate.arm_reset(self._lock_park, self._lock_seed)
+        self._lock_reset.reset(timeout=self.reset_timeout)
+        frame = gate.wait_parked(timeout=self.reset_timeout)
+        snap = self._wait_tagged(frame, timeout=self.reset_timeout)
+        advanced = 0
+        max_frames = int(self.reset_timeout * 240)
+        still, last_sig, plus_presses, seen_motion = 0, None, 0, False
+        while True:
+            # Liveness: a live match changes the fighters' state every frame
+            # (even idle animations advance).  A paused match (a pad was
+            # disconnected) shows the same frame forever and looks like a
+            # perfectly clean start, so require motion and press PLUS (a
+            # toggle) if there is none for 8 frames.
+            sig = tuple((int(f.get("action_state", -1)),
+                         float(f.get("action_frame", 0.0)),
+                         float(f.get("x", 0.0)), float(f.get("y", 0.0)))
+                        for f in snap.fighters[:2])
+            if last_sig is not None:
+                if sig == last_sig:
+                    still += 1
+                else:
+                    still, seen_motion = 0, True
+            last_sig = sig
+            if (seen_motion and self._ready_for_reset(snap)
+                    and self._clean_start(snap)):
+                break
+            if advanced >= max_frames:
+                gate.release()
+                raise SnapshotTimeout(
+                    f"lockstep reset: no live fight after {advanced} frames "
+                    f"(fight_on={snap.fight_on}, fighters={snap.n_fighters}, "
+                    f"moving={seen_motion}, PLUS pressed {plus_presses}x)")
+            if still >= 8 and plus_presses < 6:
+                self._press_plus_once()
+                plus_presses += 1
+                still, last_sig = 0, None
+                self._lock_resumed = getattr(self, "_lock_resumed", 0) + 1
+            snap = self._wait_tagged(gate.advance(1), timeout=self.reset_timeout)
+            advanced += 1
+        self._observe_stock(snap)
+        self._last_snapshot = snap
+        self._step_count = 0
+        self._episodes += 1
+        obs = self.obs_builder.build(snap)
+        info = self._base_info(snap, "reset")
+        info.update({
+            "reset_fn_used": True,
+            "reset_timeout_s": self.reset_timeout,
+            "timing": {"reset_s": time.perf_counter() - t0},
+            "lockstep": True,
+            "reset_frames_advanced": advanced,
+            "input_adapter": (
+                getattr(self._input_adapter, "name", "unresolved")
+                if self._input_resolved else "unresolved"),
+        })
+        return obs, info
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         """Request/await a fresh match and return ``(obs, info)``.
 
@@ -880,6 +1045,9 @@ class SSBUGymEnv(gym.Env):
             raise RuntimeError("environment is closed")
 
         t0 = time.perf_counter()
+        self._neutralise_input()
+        if self._lockstep:
+            return self._reset_lockstep(t0)
         reset_fn = self._get_reset_fn()
         reset_used = False
         if reset_fn is not None:
@@ -983,12 +1151,19 @@ class SSBUGymEnv(gym.Env):
         adapter.apply(canonical)
         t_written = time.perf_counter()
 
-        # Baseline after the write guarantees the action is held for at least
-        # frame_skip freshly published frames.
-        baseline = self.reader.read_latest(timeout=self.frame_timeout)
-        curr = self.reader.wait_frames(self.frame_skip,
-                                       timeout=self.frame_timeout,
-                                       start=baseline)
+        if self._lockstep:
+            # The game is parked on a frame boundary: the input written above
+            # is what its next poll sees, and exactly frame_skip frames run.
+            baseline = prev
+            target = self._gate.advance(self.frame_skip)
+            curr = self._wait_tagged(target)
+        else:
+            # Baseline after the write guarantees the action is held for at
+            # least frame_skip freshly published frames.
+            baseline = self.reader.read_latest(timeout=self.frame_timeout)
+            curr = self.reader.wait_frames(self.frame_skip,
+                                           timeout=self.frame_timeout,
+                                           start=baseline)
         t_read = time.perf_counter()
         self._observe_stock(curr)
 
@@ -1037,7 +1212,10 @@ class SSBUGymEnv(gym.Env):
             "prev_seq": prev.seq,
             "baseline_seq": baseline.seq,
             "seq_delta": max(0, curr.seq - baseline.seq),
-            "frames_advanced": max(0, curr.seq - baseline.seq) // 2,
+            "frames_advanced": (
+                int(curr.game_frame) - int(prev.game_frame)
+                if self._lockstep else max(0, curr.seq - baseline.seq) // 2),
+            "lockstep": self._lockstep,
             "input_adapter": getattr(adapter, "name", type(adapter).__name__),
             "input_error": self._input_error,
             "timing": {
@@ -1059,6 +1237,12 @@ class SSBUGymEnv(gym.Env):
         if self._closed:
             return
         self._closed = True
+        if self._gate is not None:
+            try:
+                self._gate.close()             # releases the game
+            except Exception:                  # pragma: no cover
+                pass
+            self._gate = None
         self.reader.close()
         adapter = self._input_adapter
         if adapter is not None and callable(getattr(adapter, "close", None)):
@@ -1282,20 +1466,25 @@ class ShmFixture:
                     self.version = int(value)
 
     # -- writing ----------------------------------------------------------
-    def publish(self) -> int:
-        """Write one complete frame; return its (even) sequence number."""
+    def publish(self, game_frame: int | None = None) -> int:
+        """Write one complete frame; return its (even) sequence number.
+
+        ``game_frame`` overrides the header's frame number (lockstep tests tag
+        each frame with the game frame it belongs to).
+        """
         with self._lock:
             self._seq = (self._seq + 1) | 1          # odd: body being written
             seq = self._seq
             self._mm[SEQ_OFFSET:SEQ_OFFSET + 4] = _SEQ.pack(seq)
 
             self._frame += 1
+            tag = self._frame if game_frame is None else int(game_frame)
             header = _HEADER.pack(
                 MAGIC, self.version, self._n_fighters, seq,
                 time.clock_gettime_ns(time.CLOCK_MONOTONIC), self.fps,
                 os.getpid(), self._fight_on, self._match_state,
                 self.bounds[0], self.bounds[1], self.bounds[2], self.bounds[3],
-                self.stage_id, self._frame, 0, 0, 0, 0,
+                self.stage_id, tag, 0, 0, 0, 0,
             )
             self._mm[0:HEADER_SIZE] = header
             for slot in range(MAX_FIGHTERS):

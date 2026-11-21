@@ -1030,6 +1030,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-loss-weight", type=float, default=1.0,
                     help="per-sample PPO loss multiplier on offstage states "
                          "(1 = uniform; e.g. 3)")
+    ap.add_argument("--lockstep", action="store_true",
+                    help="frame-exact stepping: the runtime parks the game "
+                         "between decisions (needs SSBU_GATE=1, which "
+                         "live_rl.sh --lockstep sets, and SSBU_SPEED != 1)")
     ap.add_argument("--pause-guard-steps", type=int, default=40,
                     help="press PLUS when no fighter field changed for this "
                          "many steps (a paused match); 0 = off")
@@ -1212,6 +1216,10 @@ def main(argv: list[str] | None = None) -> int:
                                       speed=game_speed):
                     log("[ppo] giving up: no fight")
                     return 2
+                if args.lockstep:
+                    env.enable_lockstep()
+                    log("[ppo] lockstep: the game is parked between decisions; "
+                        f"every step is exactly {cfg.frame_skip} game frames")
         if int(args.pause_guard_steps) > 0 and not args.mock \
                 and pad is not None:
             from rl.env.gym_pause import PauseGuardEnv

@@ -29,6 +29,7 @@ while [[ $# -gt 0 ]]; do
         --match)  MATCH="$2"; shift 2 ;;
         --attach) BOOT=0; shift ;;
         --speed)  SPEED="$2"; shift 2 ;;
+        --lockstep) export SSBU_GATE=1; ARGS+=("$1"); shift ;;
         --help|-h) sed -n '2,14p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *)        ARGS+=("$1"); shift ;;
     esac
@@ -38,6 +39,8 @@ export SSBU_LIVE_MATCH="$MATCH"   # ppo.restart_game relaunches with the same ma
 export SSBU_KEYBOARD_PLAYER=0
 export SSBU_INPUT_NO_FOCUS=1
 export SSBU_RL_MODE=1
+# lockstep needs one simulation step per presented frame, i.e. a speed != 1
+if [[ "${SSBU_GATE:-}" == "1" && "$SPEED" == "1" ]]; then SPEED=4; fi
 export SSBU_SPEED="$SPEED"
 unset SSBU_SEQ SSBU_PLAY SSBU_PRESS SSBU_SCRIPT
 
