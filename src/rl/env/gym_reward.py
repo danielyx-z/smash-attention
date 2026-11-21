@@ -147,11 +147,27 @@ def _number(fighter: dict, key: str, default: float = 0.0) -> float:
     return value if value == value and abs(value) != float("inf") else default
 
 
+MAX_STOCK = 99
+
+
 def _stock(fighter: dict) -> int:
     try:
         return int(fighter.get("stock", 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _stock_lost(prev: int, curr: int) -> int:
+    """Stocks lost in one step: 0 or 1.
+
+    The stock field is unreliable (-1 most of the time, and large garbage
+    values were seen: one reading turned a KO into +785 reward = 5.0 x 157).
+    A fighter loses at most one stock per step, and only a pair of readings in
+    0..MAX_STOCK says anything; the KO itself is also seen as a rebirth.
+    """
+    if not (0 <= prev <= MAX_STOCK and 0 <= curr <= MAX_STOCK):
+        return 0
+    return 1 if prev > curr else 0
 
 
 def _rebirth(fighter: dict) -> bool:
@@ -310,8 +326,8 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     # stock / KO deltas
     prev_stock_ego, stock_ego = _stock(pf_ego), _stock(cf_ego)
     prev_stock_opp, stock_opp = _stock(pf_opp), _stock(cf_opp)
-    lost_opp = max(0, prev_stock_opp - stock_opp)
-    lost_ego = max(0, prev_stock_ego - stock_ego)
+    lost_opp = _stock_lost(prev_stock_opp, stock_opp)
+    lost_ego = _stock_lost(prev_stock_ego, stock_ego)
     # The live build often reports stock==0 for both slots, so the stock delta
     # cannot see a KO.  A 0->1 rebirth transition is a direct, per-fighter
     # death/respawn signal; count the stock once (max avoids double counting
@@ -325,8 +341,8 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
 
     # match result.  A stock hitting zero is a win/loss in the 1-stock rules
     # even if fight_on has not flipped yet; only count it once.
-    opp_eliminated = prev_stock_opp > 0 and stock_opp <= 0
-    ego_eliminated = prev_stock_ego > 0 and stock_ego <= 0
+    opp_eliminated = 0 < prev_stock_opp <= MAX_STOCK and stock_opp == 0
+    ego_eliminated = 0 < prev_stock_ego <= MAX_STOCK and stock_ego == 0
     ended = _fight_on(prev) and not _fight_on(curr)
 
     if opp_eliminated and ego_eliminated:
@@ -336,7 +352,9 @@ def compute_reward(prev: Any, curr: Any, config: RewardConfig | None = None,
     elif ego_eliminated:
         reward += cfg.loss_penalty
     elif ended:
-        if stock_ego > stock_opp:
+        if not (0 <= stock_ego <= MAX_STOCK and 0 <= stock_opp <= MAX_STOCK):
+            pass                       # unreadable stocks: no result bonus
+        elif stock_ego > stock_opp:
             reward += cfg.win_bonus
         elif stock_ego < stock_opp:
             reward += cfg.loss_penalty

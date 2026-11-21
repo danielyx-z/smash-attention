@@ -1483,3 +1483,28 @@ class VelocityGarbageTest(unittest.TestCase):
         raw[0, bc.FIELD_INDEX["vy"]] = 1487.0
         raw[0, bc.FIELD_INDEX["raw_flags"]] = 1
         self.assertAlmostEqual(float(bc.obs_from_raw(raw[None])[0][3]), 1487.0)
+
+
+class StockGarbageRewardTest(unittest.TestCase):
+    def _snap(self, stock0, stock1, fight_on=1, rebirth1=0):
+        from rl.env.gym_env import make_fighter
+        f0 = make_fighter(stock=stock0, damage=0.0)
+        f1 = make_fighter(stock=stock1, damage=0.0, is_on_rebirth=rebirth1)
+        return type("S", (), {"fighters": [f0, f1], "fight_on": fight_on,
+                              "blast": None})()
+
+    def test_garbage_stock_never_produces_a_huge_reward(self):
+        from rl.env import gym_reward
+        cfg = gym_reward.RewardConfig()
+        for prev, curr in ((160, 3), (3, -1), (-1, 255), (99, 0), (1000, 1)):
+            r = gym_reward.compute_reward(self._snap(0, prev),
+                                          self._snap(0, curr), cfg, 0)
+            self.assertLess(abs(r), 20.0, (prev, curr, r))
+
+    def test_losing_one_stock_pays_once(self):
+        from rl.env import gym_reward
+        cfg = gym_reward.RewardConfig()
+        r = gym_reward.compute_reward(self._snap(0, 3), self._snap(0, 2), cfg, 0)
+        self.assertAlmostEqual(r, cfg.ko_bonus, places=5)
+        r = gym_reward.compute_reward(self._snap(0, 3), self._snap(0, 1), cfg, 0)
+        self.assertAlmostEqual(r, cfg.ko_bonus, places=5)     # capped at one
