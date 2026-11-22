@@ -900,21 +900,30 @@ def restart_game(env, pad, args, log):
     from rl.input.gym_input import VirtualPad
     from rl.input.gym_reset import ResetClient
     new_pad = VirtualPad().create()
-    base = getattr(env, "base_env", env)
-    base._input_adapter = new_pad
-    base._input_resolved = True
-    # a fresh control block / state file: re-resolve both
     try:
-        base.reader.close()
-    except Exception:                             # noqa: BLE001
-        pass
-    base._reset_fn = ResetClient(timeout=float(args.reset_timeout)).reset
-    base._reset_resolved = True
-    ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
-    game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
-    if not ge.drive_menus(base, new_pad, args.menu_timeout, log=log,
-                          speed=game_speed):
-        raise RuntimeError("game restarted but the fight did not start")
+        base = getattr(env, "base_env", env)
+        base._input_adapter = new_pad
+        base._input_resolved = True
+        # a fresh control block / state file: re-resolve both
+        try:
+            base.reader.close()
+        except Exception:                         # noqa: BLE001
+            pass
+        base._reset_fn = ResetClient(timeout=float(args.reset_timeout)).reset
+        base._reset_resolved = True
+        ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
+        game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
+        if not ge.drive_menus(base, new_pad, args.menu_timeout, log=log,
+                              speed=game_speed):
+            raise RuntimeError("game restarted but the fight did not start")
+    except BaseException:
+        # A failed attempt must not leak the pad (and its lock): the next
+        # attempt could never create one ("lock /tmp/ssbu_pad.lock busy").
+        try:
+            new_pad.destroy()
+        except Exception:                         # noqa: BLE001
+            pass
+        raise
     return new_pad
 
 

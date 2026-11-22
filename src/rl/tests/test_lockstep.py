@@ -370,3 +370,29 @@ class LockstepEnvTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndedMatchTest(unittest.TestCase):
+    def test_a_finished_match_fails_the_reset_fast(self):
+        path = _new_gate_file()
+        fix = gym_env.ShmFixture(fight_on=0, match_state=2)
+        rt = FakeRuntime(path, fix).start()
+        adapter = _Adapter(rt)
+        env = gym_env.SSBUGymEnv(
+            shm_path=fix.path, frame_skip=2, max_steps=100, reward_mode="none",
+            stock_termination=False, require_positive_stock=False,
+            input_adapter=adapter, frame_timeout=3.0, reset_timeout=60.0)
+        env.enable_lockstep(gate_path=path)
+        env._lock_reset = type("R", (), {"reset": staticmethod(
+            lambda timeout=None: rt.rematch())})()
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(gym_env.SnapshotTimeout) as ctx:
+                env.reset()
+            self.assertIn("match ended", str(ctx.exception))
+            self.assertLess(time.monotonic() - t0, 20.0)   # not the 60 s budget
+        finally:
+            env.close()
+            rt.stop()
+            fix.close()
+            os.unlink(path)

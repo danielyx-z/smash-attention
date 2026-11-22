@@ -996,7 +996,16 @@ class SSBUGymEnv(gym.Env):
         advanced = 0
         max_frames = int(self.reset_timeout * 240)
         still, last_sig, plus_presses, seen_motion = 0, None, 0, False
+        off_frames = 0
         while True:
+            # A finished match (results screen) never becomes live: fail fast
+            # instead of waiting out the whole frame budget.
+            off_frames = off_frames + 1 if int(snap.fight_on) == 0 else 0
+            if off_frames > 120:
+                gate.release()
+                raise SnapshotTimeout(
+                    "lockstep reset: the match ended (fight_on=0 for "
+                    f"{off_frames} frames, match_state={snap.match_state})")
             # Liveness: a live match changes the fighters' state every frame
             # (even idle animations advance).  A paused match (a pad was
             # disconnected) shows the same frame forever and looks like a
