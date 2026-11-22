@@ -710,13 +710,20 @@ def batch_values(model, windows, prevs, mean, std, device: str,
 
 
 def batch_logits(model, windows, prevs, mean, std, device: str,
-                 batch_size: int = 128) -> np.ndarray:
-    """First-horizon token logits for a rollout, used by the BC KL anchor."""
+                 batch_size: int = 128, obs_dim: int | None = None) -> np.ndarray:
+    """First-horizon token logits for a rollout, used by the BC KL anchor.
+
+    ``obs_dim`` lets a reference model with fewer inputs (a BC model trained
+    before extra memory features existed) look at the leading columns only.
+    """
     model.eval()
     out = []
     with torch.no_grad():
         for start in range(0, len(windows), batch_size):
             w = torch.from_numpy(windows[start:start + batch_size]).to(device)
+            if obs_dim is not None and w.shape[-1] > obs_dim:
+                w = w[..., :obs_dim]
+                mean, std = mean[..., :obs_dim], std[..., :obs_dim]
             w = (w - mean) / std
             p = torch.from_numpy(prevs[start:start + batch_size]).to(device)
             out.append(model(w, p)["action"][:, 0, :].cpu().numpy())
@@ -1157,10 +1164,12 @@ def main(argv: list[str] | None = None) -> int:
         args.model, device, dropout=args.dropout)
     model.to(device)
     ref_model = None
+    ref_obs_dim = None
     if ppo.kl_coef > 0.0:
         if args.kl_model:
             ref_model, _ref_cfg, ref_vocab, _rmean, _rstd, _ = \
                 load_bc_model(args.kl_model, device, dropout=0.0)
+            ref_obs_dim = int(_ref_cfg.obs_dim)
             if (ref_vocab.size != vocab.size or
                     not np.array_equal(ref_vocab.keys, vocab.keys)):
                 raise ValueError("--kl-model has a different action vocabulary")
@@ -1237,6 +1246,10 @@ def main(argv: list[str] | None = None) -> int:
                     env.enable_lockstep()
                     log("[ppo] lockstep: the game is parked between decisions; "
                         f"every step is exactly {cfg.frame_skip} game frames")
+        if cfg.extra_obs and not args.mock:
+            from rl.env.gym_memory import ExtraObsEnv
+            env = ExtraObsEnv(env, cfg.extra_obs)
+            log(f"[ppo] extra observation features: {list(cfg.extra_obs)}")
         if int(args.pause_guard_steps) > 0 and not args.mock \
                 and pad is not None:
             from rl.env.gym_pause import PauseGuardEnv
@@ -1379,7 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
             if ref_model is not None:
                 batch["ref_logits"] = batch_logits(
                     ref_model, batch["windows"], batch["prevs"],
-                    mean, std, device)
+                    mean, std, device, obs_dim=ref_obs_dim)
             stats = ppo_update(model, optimizer, batch, ppo, mean, std, device)
             stats_writer.record_iteration(iteration, stats)
             if episodes:

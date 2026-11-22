@@ -63,10 +63,11 @@ def mirror_action(action: Any) -> Any:
 def mirror_observation(obs: Any) -> np.ndarray:
     """Mirror the policy observation vector (OBS_DIM)."""
     arr = np.asarray(obs, np.float32).reshape(-1)
-    if arr.size != bc.OBS_DIM:
+    if arr.size < bc.OBS_DIM:
         raise ValueError(
             f"mirror wrapper expects the {bc.OBS_DIM}-dim policy "
-            f"observation, got {arr.size}")
+            f"observation (plus optional extra features), got {arr.size}")
+    # extra memory features (e.g. Up Special used) are left/right symmetric
     return bc.mirror_obs(arr)
 
 

@@ -1308,6 +1308,9 @@ class BCConfig:
     #: Add a scalar value head for PPO/RL fine-tuning.  BC checkpoints omit it;
     #: the RL loader adds it and initializes it randomly.
     value_head: bool = False
+    #: Memory features appended to the observation after the 2 x 56 state
+    #: values (see rl.env.gym_memory); obs_dim counts them.
+    extra_obs: list = field(default_factory=list)
 
     @property
     def prev_dim(self) -> int:

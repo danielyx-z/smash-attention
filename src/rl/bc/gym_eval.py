@@ -838,6 +838,10 @@ def main(argv: list[str] | None = None) -> int:
         if pad is not None:
             pad.destroy()
         raise
+    if policy.cfg.extra_obs and not is_mock:
+        from rl.env.gym_memory import ExtraObsEnv
+        env = ExtraObsEnv(env, policy.cfg.extra_obs)
+        log(f"[eval] extra observation features: {list(policy.cfg.extra_obs)}")
     try:
         if pad is not None:
             wait_for_pad(args.game_log, args.pad_timeout, log=log)
