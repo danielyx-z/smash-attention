@@ -40,6 +40,7 @@ class FakeRuntime:
         self.frame = 100
         self.tick = tick
         self.paused = False
+        self.stalled = False            # the game thread makes no progress
         self._shown = self.frame
         self.state_fn = state_fn or self._default_state
         self._mm = FrameGate(gate_path).open()._mm
@@ -91,6 +92,9 @@ class FakeRuntime:
 
     def _loop(self):
         while not self._stop.is_set():
+            if self.stalled:
+                time.sleep(0.002)
+                continue
             st = self._gate()
             parked = st.enable and self.frame >= st.limit
             if not parked:
@@ -317,6 +321,32 @@ class LockstepEnvTest(unittest.TestCase):
         pressed = [a for a in self.adapter.actions if np.asarray(a["buttons"])[8]]
         self.assertGreaterEqual(len(pressed), 1)
         self.assertFalse(self.rt.paused)
+
+    def test_a_stalled_game_that_recovers_is_waited_for(self):
+        import warnings
+        env = self._env()
+        env.frame_timeout = 0.1
+        env.stall_grace = 5.0
+        env.reset()
+        self.rt.stalled = True
+        threading.Timer(0.5, lambda: setattr(self.rt, "stalled", False)).start()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _o, _r, _t, _u, info = env.step(self._idle())   # would time out at 0.1 s
+        self.assertEqual(info["frames_advanced"], 2)
+        self.assertTrue(any("stalled" in str(w.message) for w in caught))
+
+    def test_a_dead_game_still_raises_after_the_grace(self):
+        env = self._env()
+        env.frame_timeout = 0.1
+        env.stall_grace = 0.4
+        env.reset()
+        self.rt.stalled = True
+        t0 = time.monotonic()
+        with self.assertRaises(gym_env.SnapshotTimeout):
+            env.step(self._idle())
+        self.assertGreaterEqual(time.monotonic() - t0, 0.35)
+        self.rt.stalled = False
 
     def test_close_releases_the_game(self):
         env = self._env()

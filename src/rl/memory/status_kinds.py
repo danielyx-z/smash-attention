@@ -55,6 +55,16 @@ SPECIAL_KINDS = frozenset({476, 477, 478, 479})
 #: shield relabel are derived from GUARD_HELD_KINDS.
 GUARD_KINDS = frozenset({GUARD_ON, GUARD, GUARD_OFF})
 GUARD_HELD_KINDS = frozenset({GUARD_ON, GUARD})
+#: Shield hit reaction: entered from guard when an attack lands on the shield
+#: (seen in recordings: from 27/28, opponent aerial in range, no damage).
+GUARD_DAMAGE = 30
+#: Spot dodge, rolls (forward / back) and air dodge: invulnerable frames.
+DODGE_KINDS = frozenset({31, 32, 33, 34})
+#: Opponent statuses that carry a hitbox: jab, tilts, smashes, aerials,
+#: specials (and DK's special sub-states).  Used to tell that a dodge or a
+#: shield had something to defend against.
+ATTACK_KINDS = frozenset(set(range(39, 55)) | {476, 477, 478, 479}
+                         | set(range(505, 512)))
 #: Dead / respawning.
 KO_KINDS = frozenset({DEAD_ENTRY, KO})
 REBIRTH_KINDS = frozenset({REBIRTH_PLATFORM})

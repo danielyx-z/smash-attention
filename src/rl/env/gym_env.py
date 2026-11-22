@@ -911,23 +911,42 @@ class SSBUGymEnv(gym.Env):
     def lockstep(self) -> bool:
         return self._lockstep
 
+    #: Seconds a lockstep step may wait for the game before it is treated as a
+    #: hang.  A stalled presentation (the window being dragged, a compositor
+    #: hiccup) frees itself; a dead game does not.
+    stall_grace = 60.0
+
     def _wait_tagged(self, frame: int, timeout: float | None = None) -> RawSnapshot:
         """Wait for the snapshot the reader tagged with game frame ``frame``."""
         limit = self.frame_timeout if timeout is None else float(timeout)
-        deadline = time.monotonic() + limit
+        start = time.monotonic()
+        deadline = start + limit
+        grace_deadline = start + max(limit, self.stall_grace)
         want = int(frame) & 0xFFFFFFFF
+        warned = False
         while True:
             snap = self.reader.read_latest(
                 timeout=max(0.001, deadline - time.monotonic()))
             if int(snap.game_frame) == want:
                 return snap
-            if time.monotonic() >= deadline:
+            now = time.monotonic()
+            if now >= deadline:
+                if self._gate is not None and now < grace_deadline:
+                    if not warned:
+                        warnings.warn(
+                            f"lockstep: no frame {want} after {limit:.1f}s "
+                            "(game stalled?); waiting up to "
+                            f"{self.stall_grace:.1f}s", RuntimeWarning)
+                        warned = True
+                    deadline = grace_deadline
+                    time.sleep(0.01)
+                    continue
                 gs = self._gate.read() if self._gate is not None else None
                 raise SnapshotTimeout(
                     f"no snapshot tagged game frame {want} within "
-                    f"{limit:.1f}s (latest tag {snap.game_frame}, gate {gs}); "
-                    "is the reader running and the game started with "
-                    "SSBU_GATE=1?")
+                    f"{now - start:.1f}s (latest tag {snap.game_frame}, "
+                    f"gate {gs}); is the reader running and the game "
+                    "started with SSBU_GATE=1?")
             time.sleep(0.0002)
 
     def _press_plus_once(self) -> None:

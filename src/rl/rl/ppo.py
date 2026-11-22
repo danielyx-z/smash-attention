@@ -542,7 +542,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     vocab: bc.ActionVocab, mean, std, device: str,
                     steps: int, seed: int,
                     on_episode=None, on_step=None,
-                    on_reset_error=None) -> tuple[dict, list[dict]]:
+                    on_reset_error=None,
+                    on_step_error=None) -> tuple[dict, list[dict]]:
     """Run the live env, returning flat transition arrays and episode rows."""
     model.eval()
     windows, prevs, actions, logps, values, rewards = [], [], [], [], [], []
@@ -581,8 +582,34 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         action, token, logp, value = act_token(
             model, state, vocab, mean, std, device, sample=True)
         env_action = ge.format_action(action, "auto", env)
-        next_obs, reward, terminated, truncated, info = ge.step_env(
-            env, env_action)
+        try:
+            next_obs, reward, terminated, truncated, info = ge.step_env(
+                env, env_action)
+        except Exception as exc:                  # noqa: BLE001
+            if on_step_error is None:
+                raise
+            # The game hung or died mid-step (e.g. no new frame for seconds).
+            # Recover it, drop the partial episode (no row), cut the GAE
+            # chain at the last good transition and start a new episode.
+            on_step_error(exc)
+            if truncateds:
+                truncateds[-1] = True
+            ep += 1
+            obs, info = do_reset(seed + ep)
+            prime_state(state, env, obs)
+            ep_ret = 0.0
+            ep_len = 0
+            ep_dealt = 0.0
+            ep_taken = 0.0
+            peak = {"p1_damage": 0.0, "p2_damage": 0.0}
+            prev_rebirth = _rebirth_flags(info)
+            prev_damages = _damages(info)
+            deaths = {"p1": 0, "p2": 0}
+            death_rewards = []
+            death_infos = []
+            ego_hist.clear()
+            ego_hist.append(_ego_snapshot(info, ego_slot_id))
+            continue
         next_obs = ge._extract_obs(next_obs)
         state.observe(next_obs)
         windows.append(window)
@@ -812,6 +839,12 @@ def dump_wedge_diagnostics(tag: str, log) -> str | None:
                 parts.append(f"control: {cb.read()}")
         except Exception as exc:                  # noqa: BLE001
             parts.append(f"control: unreadable ({exc})")
+        try:
+            from rl.input.gate import FrameGate
+            with FrameGate().open() as g:
+                parts.append(f"gate: {g.read()}")
+        except Exception as exc:                  # noqa: BLE001
+            parts.append(f"gate: unavailable ({exc})")
         try:
             from rl.input.gym_reset import read_state
             parts.append(f"state: {read_state()}")
@@ -1054,6 +1087,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offstage-loss-weight", type=float, default=1.0,
                     help="per-sample PPO loss multiplier on offstage states "
                          "(1 = uniform; e.g. 3)")
+    ap.add_argument("--block-bonus", type=float, default=0.0,
+                    help="reward for a shield block: entering the shield-hit "
+                         "reaction from guard without taking damage (0 = off)")
+    ap.add_argument("--dodge-bonus", type=float, default=0.0,
+                    help="reward for dodging: a spot dodge/roll/air dodge "
+                         "that ends unhurt with an attack in range (0 = off)")
     ap.add_argument("--lockstep", action="store_true",
                     help="frame-exact stepping: the runtime parks the game "
                          "between decisions (needs SSBU_GATE=1, which "
@@ -1246,6 +1285,13 @@ def main(argv: list[str] | None = None) -> int:
                     env.enable_lockstep()
                     log("[ppo] lockstep: the game is parked between decisions; "
                         f"every step is exactly {cfg.frame_skip} game frames")
+        if (float(args.block_bonus) > 0 or float(args.dodge_bonus) > 0) \
+                and not args.mock:
+            from rl.env.gym_defense import DefenseRewardEnv
+            env = DefenseRewardEnv(env, float(args.block_bonus),
+                                   float(args.dodge_bonus))
+            log(f"[ppo] defense reward: block {args.block_bonus:g}, "
+                f"dodge {args.dodge_bonus:g}")
         if cfg.extra_obs and not args.mock:
             from rl.env.gym_memory import ExtraObsEnv
             env = ExtraObsEnv(env, cfg.extra_obs)
@@ -1314,6 +1360,17 @@ def main(argv: list[str] | None = None) -> int:
                     exc = retry_exc
             raise exc
 
+        def step_with_recovery(exc: Exception) -> None:
+            """A step failed (game hung / frames stopped): restart the game."""
+            nonlocal pad
+            log(f"[ppo] env.step failed ({type(exc).__name__}: {exc}); "
+                "restarting the game")
+            if pad is None:
+                raise exc
+            dump_wedge_diagnostics("step", log)
+            pad = restart_game(env, pad, args, log)
+            health["ok"] = False
+
         def episode_log(row: dict) -> None:
             stats_writer.record_episode(row)
             if (abs(float(row.get("return", 0.0) or 0.0)) > 1e-9
@@ -1343,7 +1400,8 @@ def main(argv: list[str] | None = None) -> int:
                 int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
                 on_episode=episode_log,
                 on_step=stats_writer.record_step,
-                on_reset_error=reset_with_recovery)
+                on_reset_error=reset_with_recovery,
+                on_step_error=step_with_recovery)
             # In a recovery drill P1 may never touch P2, so zero damage is
             # expected rather than evidence of a stalled pad.
             dead = [] if args.recovery_drill else [
@@ -1404,6 +1462,18 @@ def main(argv: list[str] | None = None) -> int:
                         if e.get("return") is not None]
                 p1d = sum(int(e.get("p1_deaths", 0) or 0) for e in episodes)
                 p2d = sum(int(e.get("p2_deaths", 0) or 0) for e in episodes)
+                dcounts = None
+                node = env
+                for _ in range(8):                  # walk the wrapper chain
+                    if hasattr(node, "blocks") and hasattr(node, "dodges"):
+                        dcounts = (node.blocks, node.dodges)
+                        break
+                    node = getattr(node, "env", None)
+                    if node is None:
+                        break
+                if dcounts is not None:
+                    log(f"[ppo] defense so far: {dcounts[0]} blocks, "
+                        f"{dcounts[1]} dodges")
                 log(f"[ppo] iter {iteration}/{ppo.iterations}: "
                     f"steps {len(batch['actions'])} eps {len(episodes)} "
                     f"dealt {np.mean(dealt) if dealt else float('nan'):.1f} "
