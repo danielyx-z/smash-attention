@@ -1289,6 +1289,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--game-log", default="~/smash.log")
     ap.add_argument("--pad-timeout", type=float, default=15.0)
     ap.add_argument("--menu-timeout", type=float, default=120.0)
+    ap.add_argument("--start-attempts", type=int, default=4,
+                    help="game launches tried before the first menu walk is "
+                         "given up on (needs live_rl.sh, which sets "
+                         "SSBU_LIVE_MATCH)")
     ap.add_argument("--reset-timeout", type=float, default=20.0,
                     help="seconds to wait for the in-fight rematch ack")
     ap.add_argument("--mock", action="store_true",
@@ -1422,8 +1426,25 @@ def main(argv: list[str] | None = None) -> int:
             if pad is not None:
                 ge.wait_for_pad(args.game_log, args.pad_timeout, log=log)
                 game_speed = float(os.environ.get("SSBU_SPEED", "1") or 1.0)
-                if not ge.drive_menus(env, pad, args.menu_timeout, log=log,
-                                      speed=game_speed):
+                walked = ge.drive_menus(env, pad, args.menu_timeout, log=log,
+                                        speed=game_speed)
+                # The menu macro is open loop: under CPU load a screen can come
+                # up late and the macro ends up pressing into the wrong one (seen
+                # live: hand parked above the stage grid, 60 s stuck).  A fresh
+                # game almost always walks fine, so restart it instead of giving up.
+                attempt = 1
+                while (not walked and attempt < int(args.start_attempts)
+                       and os.environ.get("SSBU_LIVE_MATCH")):
+                    attempt += 1
+                    log("[ppo] the menu walk did not reach the fight; "
+                        f"restarting the game (attempt {attempt}/"
+                        f"{args.start_attempts})")
+                    try:
+                        pad = restart_game(env, pad, args, log)
+                        walked = True
+                    except Exception as exc:  # noqa: BLE001
+                        log(f"[ppo] restart attempt {attempt} failed: {exc}")
+                if not walked:
                     log("[ppo] giving up: no fight")
                     return 2
                 if args.lockstep:

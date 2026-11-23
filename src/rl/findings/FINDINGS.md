@@ -2226,3 +2226,36 @@ B determinism, C stall invariance, D input latency).  Run each audit on a
 * Runtime change is local to `ssbu-recomp/runtime/debug_mode.c` (not pushed);
   built with `rl-host-link debug_mode.c` (1 file, ~1 s; the game library is not
   touched).
+
+## 2026-11-23 speed profile, VirtualQuery, startup menu desync
+
+* Where a step goes (training, lockstep, frame_skip 2, ~59 s per 3600 steps):
+  game wait 13.3 ms/step (~84 %), policy inference 1.2 ms (CPU copy; 2.5 ms on
+  the GPU), env/input overhead 0.3 ms, update 1-2 s per iteration.  The game's
+  host thread is the limit: 6.3-7.3 ms of CPU per frame, ~94 % busy, so one
+  game cannot go faster than ~60 steps/s on this i7-9700.  Nothing but the host
+  thread's single-thread speed (or more game instances) moves it.
+* `perf record` of that thread (needs `kernel.perf_event_paranoid<=1`): game
+  code 62 %, `VirtualQuery` 17 % (text parse of /proc/self/maps + the kernel
+  building it), kernel 10 %, our runtime 7 %.  Headless / null renderer could
+  only remove part of the 7 %: ~2-4 %, not worth building.
+* `VirtualQuery` fast path (the PROCMAP_QUERY ioctl) was compiled out: the
+  installed linux-libc-dev headers lack the macro although kernel 7.0 has the
+  ioctl.  Fixed in `ssbu-recomp/runtime/plat_posix.c` (commit 0333809, local,
+  not pushed): magic is 'f' (not 0x9f; a wrong value gives ENOTTY and silently
+  falls back, which made a first "0 mismatches" check vacuous).  `SSBU_VQ_CHECK=1`
+  answers every call with both paths and prints how many the ioctl answered;
+  80k+ live calls, 0 mismatches, 92 % by the ioctl.  +10-14 % steps/s in
+  alternating old/new blocks of one launch (load average ~13).
+* Full-state hash comparison is not reproducible with the reset-based pipeline:
+  the CPU opponent keeps state across rematches (P2 differs at step 0 even on
+  the same path in one launch) and fresh launches differ in spawn side.
+* Startup menu walk (`drive_menus`) fails ~1 in 3 under heavy CPU load: a screen
+  comes up late, an "up" flick meant for the roster lands on the stage screen and
+  parks the hand above the grid (A then does nothing for ever).  A blind recovery
+  press fixed that screen but broke character select (moved the token onto the
+  P1 type switch), so it was dropped.  `ppo.py` now restarts the game and walks
+  again (`--start-attempts`, default 4): 6 of 6 short runs started under load 12
+  (2 needed one restart).
+* Profiling and timing numbers taken while other jobs (Isaac Sim, Gazebo) kept
+  the load average at 10-13 are noisy; compare in alternating blocks.
