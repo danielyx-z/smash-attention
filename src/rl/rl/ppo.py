@@ -552,7 +552,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     steps: int, seed: int,
                     on_episode=None, on_step=None,
                     on_reset_error=None,
-                    on_step_error=None) -> tuple[dict, list[dict]]:
+                    on_step_error=None,
+                    profile: dict | None = None) -> tuple[dict, list[dict]]:
     """Run the live env, returning flat transition arrays and episode rows."""
     from rl.memory import status_kinds as status_kinds_mod
     model.eval()
@@ -561,13 +562,22 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     offstage_flags: list[bool] = []
     episodes: list[dict] = []
 
+    prof = profile if profile is not None else {}
+    for key in ("act", "env", "game_wait", "env_other", "post", "reset",
+                "steps", "resets"):
+        prof.setdefault(key, 0.0)
+
     def do_reset(reset_seed: int):
+        t_r = time.perf_counter()
         try:
             return ge.reset_env(env, reset_seed)
         except Exception as exc:                  # noqa: BLE001
             if on_reset_error is None:
                 raise
             return on_reset_error(reset_seed, exc)
+        finally:
+            prof["reset"] += time.perf_counter() - t_r
+            prof["resets"] += 1
 
     obs, info = do_reset(seed)
     prime_state(state, env, obs)
@@ -589,14 +599,24 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     ego_slot_id = int(getattr(env, "ego_slot", 0) or 0)
     ego_hist.append(_ego_snapshot(info, ego_slot_id))
     while len(rewards) < steps:
+        t_a = time.perf_counter()
         window = state.window().copy()
         prev = state.prev.copy()
         action, token, logp, value = act_token(
             model, state, vocab, mean, std, device, sample=True)
         env_action = ge.format_action(action, "auto", env)
+        t_e = time.perf_counter()
+        prof["act"] += t_e - t_a
         try:
             next_obs, reward, terminated, truncated, info = ge.step_env(
                 env, env_action)
+            t_f = time.perf_counter()
+            prof["env"] += t_f - t_e
+            tm = (info.get("timing") or {}) if isinstance(info, dict) else {}
+            prof["game_wait"] += float(tm.get("read_s", 0.0) or 0.0)
+            prof["env_other"] += (float(tm.get("total_s", 0.0) or 0.0)
+                                  - float(tm.get("read_s", 0.0) or 0.0))
+            prof["steps"] += 1
         except Exception as exc:                  # noqa: BLE001
             if on_step_error is None:
                 raise
@@ -623,6 +643,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             ego_hist.clear()
             ego_hist.append(_ego_snapshot(info, ego_slot_id))
             continue
+        t_p = time.perf_counter()
         next_obs = ge._extract_obs(next_obs)
         state.observe(next_obs)
         windows.append(window)
@@ -665,6 +686,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
         ep_taken += max(0.0, curr_damages[0] - prev_damages[0])
         ep_dealt += max(0.0, curr_damages[1] - prev_damages[1])
         prev_damages = curr_damages
+        prof["post"] += time.perf_counter() - t_p
         if on_step is not None:
             on_step({
                 "episode": ep + 1,
@@ -1536,6 +1558,7 @@ def main(argv: list[str] | None = None) -> int:
                     and pad is not None):
                 pad = restart_game(env, pad, args, log)
             t0 = time.monotonic()
+            prof = {}
             if play_model is not model:
                 play_model.load_state_dict(
                     {k: v.detach().cpu() for k, v in model.state_dict().items()})
@@ -1546,7 +1569,7 @@ def main(argv: list[str] | None = None) -> int:
                 on_episode=episode_log,
                 on_step=stats_writer.record_step,
                 on_reset_error=reset_with_recovery,
-                on_step_error=step_with_recovery)
+                on_step_error=step_with_recovery, profile=prof)
             # In a recovery drill P1 may never touch P2, so zero damage is
             # expected rather than evidence of a stalled pad.
             dead = [] if args.recovery_drill else [
@@ -1610,6 +1633,20 @@ def main(argv: list[str] | None = None) -> int:
             stats = ppo_update(model, optimizer, train_batch, ppo, mean, std,
                                device)
             upd_s = time.monotonic() - t_upd
+            n_st = max(1.0, prof.get("steps", 0.0))
+            wall = time.monotonic() - t0
+            log("[ppo] time: wall %.0fs = game wait %.0fs (%.1f ms/step) + "
+                "action/inference %.0fs (%.2f ms) + env step overhead %.0fs "
+                "(%.2f ms) + obs/bookkeeping %.0fs (%.2f ms) + resets %.0fs "
+                "(%d) + update %.0fs + other %.0fs" % (
+                    wall, prof["game_wait"], 1e3 * prof["game_wait"] / n_st,
+                    prof["act"], 1e3 * prof["act"] / n_st,
+                    prof["env"] - prof["game_wait"],
+                    1e3 * (prof["env"] - prof["game_wait"]) / n_st,
+                    prof["post"], 1e3 * prof["post"] / n_st,
+                    prof["reset"], int(prof["resets"]), upd_s,
+                    wall - prof["env"] - prof["act"] - prof["post"]
+                    - prof["reset"] - upd_s))
             stats_writer.record_iteration(iteration, stats)
             if episodes:
                 dealt = [e["p2_damage"] for e in episodes
