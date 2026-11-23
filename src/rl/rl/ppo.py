@@ -1140,6 +1140,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=os.path.join(REPO, "data", "models",
                                                   "rl_dk9_ppo.pt"))
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--cpu-rollout", action="store_true",
+                    help="play the episodes with a CPU copy of the policy "
+                         "(1 ms per decision vs 2.5 ms on the GPU for this "
+                         "tiny model; the game waits for every decision); "
+                         "updates stay on --device")
     ap.add_argument("--iterations", type=int, default=10)
     ap.add_argument("--rollout-steps", type=int, default=2048)
     ap.add_argument("--max-steps", type=int, default=900,
@@ -1460,6 +1465,15 @@ def main(argv: list[str] | None = None) -> int:
 
         state = PolicyState(cfg)
         replay_buf: list[dict] = []          # last --replay raw rollouts
+        play_model, play_mean, play_std, play_device = model, mean, std, device
+        if args.cpu_rollout and device != "cpu":
+            import copy
+            torch.set_num_threads(2)
+            play_model = copy.deepcopy(model).to("cpu").eval()
+            play_mean, play_std = mean.detach().cpu(), std.detach().cpu()
+            play_device = "cpu"
+            log("[ppo] rollouts use a CPU copy of the policy "
+                "(synced after every update)")
 
         health = {"ok": True}
 
@@ -1522,8 +1536,12 @@ def main(argv: list[str] | None = None) -> int:
                     and pad is not None):
                 pad = restart_game(env, pad, args, log)
             t0 = time.monotonic()
+            if play_model is not model:
+                play_model.load_state_dict(
+                    {k: v.detach().cpu() for k, v in model.state_dict().items()})
             batch, episodes = collect_rollout(
-                env, model, state, cfg, vocab, mean, std, device,
+                env, play_model, state, cfg, vocab, play_mean, play_std,
+                play_device,
                 int(ppo.rollout_steps), int(ppo.seed) + 1000 * iteration,
                 on_episode=episode_log,
                 on_step=stats_writer.record_step,

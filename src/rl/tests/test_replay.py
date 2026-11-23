@@ -86,3 +86,26 @@ class ReplayTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CpuRolloutTest(unittest.TestCase):
+    def test_cpu_copy_gives_the_same_actions_after_a_sync(self):
+        import copy
+        cfg, model, d, _batch, mean, std = _setup()
+        vocab = bc.ActionVocab(keys=np.arange(9, dtype=np.int64), observed=9)
+        play = copy.deepcopy(model).eval()
+        with torch.no_grad():                      # the learner moves on
+            for p in model.parameters():
+                p.add_(0.1)
+        play.load_state_dict({k: v.detach().cpu()
+                              for k, v in model.state_dict().items()})
+        st = ppo.PolicyState(cfg)
+        for _ in range(cfg.window):
+            st.observe(np.random.default_rng(1).normal(size=d))
+        w = torch.from_numpy(st.window())[None]
+        pv = torch.from_numpy(st.prev)[None]
+        model.eval()
+        with torch.no_grad():
+            a = model(w, pv)["action"]
+            b = play(w, pv)["action"]
+        self.assertTrue(torch.allclose(a, b, atol=1e-6))
