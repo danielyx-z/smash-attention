@@ -63,6 +63,13 @@ class PPOConfig:
     #: critic from ignoring the states where deaths actually happen.
     offstage_loss_weight: float = 1.0
     max_grad_norm: float = 0.5
+    #: Dual clip: for a negative advantage the loss is bounded below by
+    #: ``dual_clip * adv`` (stale replayed samples can have huge ratios).
+    dual_clip: float = 3.0
+    #: Stop the epochs early once the mean approximate KL between the sampling
+    #: policy and the current one, on this iteration's fresh samples, passes
+    #: this value (0 = never).
+    target_kl: float = 0.0
     weight_decay: float = 1e-4
     seed: int = 0
     device: str = "cuda"
@@ -771,6 +778,45 @@ def batch_logits(model, windows, prevs, mean, std, device: str,
         (0, 0), np.float32)
 
 
+_REPLAY_KEYS = ("windows", "prevs", "actions", "logps", "rewards",
+                "next_windows", "next_prevs", "terminals", "truncateds",
+                "offstage", "ref_logits")
+
+
+def merge_replay(current: dict, past: list[dict], model, cfg: PPOConfig,
+                 mean, std, device: str) -> dict:
+    """Current batch plus the last few batches, advantages recomputed.
+
+    The older rollouts keep the log-probs of the policy that played them, so
+    the PPO ratio (with clipping and dual clip) corrects for the staleness.
+    Their values, advantages and returns are recomputed with the current
+    critic, which is much fresher than the ones stored at collection time.
+    ``fresh`` marks the current batch (used for the KL early stop).
+    """
+    parts = [dict(current)]
+    for old in past:
+        nv = batch_values(model, old["next_windows"], old["next_prevs"],
+                          mean, std, device)
+        v = batch_values(model, old["windows"], old["prevs"], mean, std, device)
+        adv, ret = compute_gae(old["rewards"], v, nv, old["terminals"],
+                               old["truncateds"], float(cfg.gamma),
+                               float(cfg.lam))
+        adv = (adv - float(adv.mean())) / (float(adv.std()) + 1e-8)
+        part = {k: old[k] for k in _REPLAY_KEYS if k in old}
+        part["advantages"] = adv.astype(np.float32)
+        part["returns"] = ret.astype(np.float32)
+        parts.append(part)
+    keys = ["windows", "prevs", "actions", "logps", "advantages", "returns",
+            "offstage"]
+    if all("ref_logits" in p for p in parts):
+        keys.append("ref_logits")
+    merged = {k: np.concatenate([np.asarray(p[k]) for p in parts])
+              for k in keys}
+    merged["fresh"] = np.concatenate([
+        np.full(len(p["actions"]), i == 0) for i, p in enumerate(parts)])
+    return merged
+
+
 def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
                mean, std, device: str) -> dict:
     """A few PPO epochs over one rollout."""
@@ -778,11 +824,17 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
     n = len(batch["actions"])
     clip = float(cfg.clip)
     stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
-             "kl_bc": 0.0}
+             "kl_bc": 0.0, "clipfrac": 0.0, "approx_kl": 0.0}
     seen = 0
+    fresh_seen = 0
     ref_logits = batch.get("ref_logits")
     kl_coef = float(cfg.kl_coef)
+    fresh = batch.get("fresh")
+    dual = float(getattr(cfg, "dual_clip", 0.0) or 0.0)
+    target_kl = float(getattr(cfg, "target_kl", 0.0) or 0.0)
+    epochs_run = 0
     for _epoch in range(int(cfg.epochs)):
+        epoch_kl, epoch_n = 0.0, 0
         order = np.random.permutation(n)
         for start in range(0, n, int(cfg.minibatch)):
             idx = order[start:start + int(cfg.minibatch)]
@@ -799,6 +851,9 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
             ratio = torch.exp(logp - old_logp)
             surr1 = ratio * adv
             surr2 = torch.clamp(ratio, 1.0 - clip, 1.0 + clip) * adv
+            pg = torch.min(surr1, surr2)
+            if dual > 1.0:
+                pg = torch.where(adv < 0, torch.max(pg, dual * adv), pg)
             # Offstage transitions are rare but decisive.  Up-weight them so
             # the critic does not fit only the common on-stage states.
             weights = torch.ones_like(adv)
@@ -808,7 +863,7 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
                 ).to(device)
                 weights = 1.0 + (float(cfg.offstage_loss_weight) - 1.0) * off
                 weights = weights / weights.mean()
-            policy_loss = (-torch.min(surr1, surr2) * weights).mean()
+            policy_loss = (-pg * weights).mean()
             # Huber, not MSE: stock/death returns are sparse and large (one
             # -5.0 among thousands of near-zero steps).  Squared error on those
             # outliers produced a value loss of ~6 and corrupted the shared
@@ -834,9 +889,27 @@ def ppo_update(model, optimizer, batch: dict, cfg: PPOConfig,
             stats["value_loss"] += float(value_loss.detach()) * m
             stats["entropy"] += float(entropy.detach()) * m
             stats["kl_bc"] += float(kl.detach()) * m
+            stats["clipfrac"] += float(
+                ((ratio.detach() - 1.0).abs() > clip).float().mean()) * m
             seen += m
+            if fresh is not None:
+                fm = torch.from_numpy(np.asarray(fresh)[idx]).to(device)
+                if bool(fm.any()):
+                    akl = float((old_logp - logp.detach())[fm].mean())
+                    k = int(fm.sum())
+                    epoch_kl += akl * k
+                    epoch_n += k
+                    stats["approx_kl"] += akl * k
+                    fresh_seen += k
+        epochs_run += 1
+        if target_kl > 0.0 and epoch_n and epoch_kl / epoch_n > target_kl:
+            break                          # the policy already moved enough
     model.eval()
-    return {k: v / max(1, seen) for k, v in stats.items()}
+    out = {k: v / max(1, seen) for k, v in stats.items()
+           if k != "approx_kl"}
+    out["approx_kl"] = stats["approx_kl"] / max(1, fresh_seen)
+    out["epochs_run"] = float(epochs_run)
+    return out
 
 
 def dump_wedge_diagnostics(tag: str, log) -> str | None:
@@ -1074,6 +1147,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--epochs", type=int, default=4)
     ap.add_argument("--minibatch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--replay", type=int, default=0,
+                    help="also train on the last N iterations' rollouts "
+                         "(advantages recomputed, PPO ratio + dual clip "
+                         "handle the staleness); 0 = on-policy only")
+    ap.add_argument("--dual-clip", type=float, default=3.0,
+                    help="lower bound on the loss for negative advantages "
+                         "(ratio cap); 0 = off")
+    ap.add_argument("--target-kl", type=float, default=0.0,
+                    help="stop the epochs early when the policy moved this "
+                         "far (approx KL on fresh samples); 0 = never")
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--clip", type=float, default=0.2)
@@ -1194,6 +1277,7 @@ def main(argv: list[str] | None = None) -> int:
         lam=args.lam, clip=args.clip, entropy=args.entropy,
         value_coef=args.value_coef, kl_coef=args.kl_coef,
         offstage_loss_weight=args.offstage_loss_weight,
+        dual_clip=args.dual_clip, target_kl=args.target_kl,
         weight_decay=args.weight_decay, seed=args.seed,
         device=args.device)
     ppo.check()
@@ -1375,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
                 "are presented left/right flipped")
 
         state = PolicyState(cfg)
+        replay_buf: list[dict] = []          # last --replay raw rollouts
 
         health = {"ok": True}
 
@@ -1493,7 +1578,20 @@ def main(argv: list[str] | None = None) -> int:
                 batch["ref_logits"] = batch_logits(
                     ref_model, batch["windows"], batch["prevs"],
                     mean, std, device, obs_dim=ref_obs_dim)
-            stats = ppo_update(model, optimizer, batch, ppo, mean, std, device)
+            t_upd = time.monotonic()
+            train_batch = batch
+            if int(args.replay) > 0:
+                if replay_buf:
+                    train_batch = merge_replay(batch, replay_buf, model, ppo,
+                                               mean, std, device)
+                else:
+                    train_batch = dict(batch)
+                    train_batch["fresh"] = np.ones(len(batch["actions"]), bool)
+                replay_buf.append(batch)
+                del replay_buf[:-int(args.replay)]
+            stats = ppo_update(model, optimizer, train_batch, ppo, mean, std,
+                               device)
+            upd_s = time.monotonic() - t_upd
             stats_writer.record_iteration(iteration, stats)
             if episodes:
                 dealt = [e["p2_damage"] for e in episodes
@@ -1526,6 +1624,10 @@ def main(argv: list[str] | None = None) -> int:
                     f"value {stats['value_loss']:.4f} "
                     f"entropy {stats['entropy']:.3f} "
                     f"kl_bc {stats['kl_bc']:.4f} "
+                    f"clipfrac {stats.get('clipfrac', 0.0):.3f} "
+                    f"approx_kl {stats.get('approx_kl', 0.0):.4f} "
+                    f"epochs {int(stats.get('epochs_run', 0))} "
+                    f"train {len(train_batch['actions'])} upd {upd_s:.0f}s "
                     f"({time.monotonic() - t0:.0f}s)")
             else:
                 log(f"[ppo] iter {iteration}/{ppo.iterations}: "
