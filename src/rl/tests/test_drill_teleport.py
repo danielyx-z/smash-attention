@@ -56,7 +56,7 @@ class TeleportDrillTest(unittest.TestCase):
                                       handoff_y_range=(-90.0, -20.0), **kw)
 
     def test_drop_is_requested_with_damage_offstage_and_no_setup_steps(self):
-        base, env = self._env(damage_range=(0.0, 100.0))
+        base, env = self._env(damage_range=(0.0, 100.0), helpless_prob=0.0)
         _obs, info = env.reset(seed=3)
         drop = base.drops[0]
         self.assertTrue(95.0 <= abs(drop["x"]) <= 140.0)
@@ -87,6 +87,15 @@ class TeleportDrillTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(float(seen[0]["buttons"][2]), 1.0)      # X
         self.assertEqual(len(env.setup_observations), 1)
+
+    def test_helpless_drops_stay_in_the_winnable_zone(self):
+        base, env = self._env(helpless_prob=1.0)
+        for s in range(30):
+            env.reset(seed=s)
+        for d in base.drops:
+            self.assertTrue(d["helpless"])
+            self.assertTrue(85.0 <= abs(d["x"]) <= 100.0)
+            self.assertTrue(-35.0 <= d["y"] <= -15.0)
 
     def test_helpless_start_never_spends_a_jump(self):
         base, env = self._env(helpless_prob=1.0, jump_spent_prob=1.0)

@@ -1261,6 +1261,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="teleport drill: start helpless (Up-B already spent)")
     ap.add_argument("--drill-jump-spent-prob", type=float, default=0.3,
                     help="teleport drill: start with the midair jump used")
+    ap.add_argument("--drill-x-min", type=float, default=95.0,
+                    help="teleport drill: nearest |x| of a drop (ledge is 83.6)")
+    ap.add_argument("--drill-x-max", type=float, default=140.0,
+                    help="teleport drill: farthest |x| of a drop")
     ap.add_argument("--drill-max-steps", type=int, default=0,
                     help="cap a drill episode at this many decisions "
                          "(0 = the env max)")
@@ -1492,6 +1496,7 @@ def main(argv: list[str] | None = None) -> int:
                     damage_range=(0.0, float(args.drill_damage_max)),
                     helpless_prob=float(args.drill_helpless_prob),
                     jump_spent_prob=float(args.drill_jump_spent_prob),
+                    x_range=(args.drill_x_min, args.drill_x_max),
                     drill_max_steps=int(args.drill_max_steps))
                 log("[ppo] recovery drill: "
                     + ("the runtime drops P1 offstage with random damage"

@@ -129,7 +129,9 @@ class RecoveryDrillEnv:
                  log=None, teleport: bool = False,
                  damage_range: tuple = (0.0, 100.0), helpless_prob: float = 0.3,
                  jump_spent_prob: float = 0.3, x_range: tuple = (95.0, 140.0),
-                 drill_max_steps: int = 0):
+                 drill_max_steps: int = 0,
+                 helpless_x_range: tuple = (85.0, 100.0),
+                 helpless_y_range: tuple = (-35.0, -15.0)):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
         self.settle_steps = max(1, int(settle_steps))
@@ -150,6 +152,13 @@ class RecoveryDrillEnv:
         self.helpless_prob = float(helpless_prob)
         self.jump_spent_prob = float(jump_spent_prob)
         self.x_range = tuple(float(v) for v in x_range)
+        # A helpless fighter (Up Special spent) can only drift: from far out or
+        # deep it is lost whatever the policy does (live data: 92 % of helpless
+        # drops died, 6 % grabbed the ledge), so those drops teach nothing but
+        # noise.  Keep them to a zone close to the ledge where a ledge grab is
+        # possible.
+        self.helpless_x_range = tuple(float(v) for v in helpless_x_range)
+        self.helpless_y_range = tuple(float(v) for v in helpless_y_range)
         self.drill_max_steps = max(0, int(drill_max_steps))   # 0 = env max
         self._drill = True
         self.setup_observations: list[np.ndarray] = []
@@ -256,10 +265,14 @@ class RecoveryDrillEnv:
         """Drop P1 offstage in one reset: no run-off, no settle wait."""
         rng = np.random.default_rng(None if seed is None else int(seed) + 7919)
         side = -1.0 if rng.random() < 0.5 else 1.0
-        x = side * float(rng.uniform(*self.x_range))
-        y = float(rng.uniform(*self.handoff_y_range))
-        damage = float(rng.uniform(*self.damage_range))
+        damage_u = rng.random()
         helpless = bool(rng.random() < self.helpless_prob)
+        xr = self.helpless_x_range if helpless else self.x_range
+        yr = self.helpless_y_range if helpless else self.handoff_y_range
+        x = side * float(rng.uniform(*xr))
+        y = float(rng.uniform(*yr))
+        damage = self.damage_range[0] + damage_u * (self.damage_range[1]
+                                                    - self.damage_range[0])
         spend_jump = (not helpless) and bool(rng.random() < self.jump_spent_prob)
         base = self.base_env
         base.drill_drop = {"x": x, "y": y, "damage": damage,
