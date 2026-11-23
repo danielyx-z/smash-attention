@@ -124,6 +124,12 @@ CMD_CLEAR_PAD = 3
 #: publishes as that fighter's buttons/stick: the expert label for the state the
 #: policy produced.  ``flags`` bit 4 = forcing right now, bit 5 = P1 is CPU.
 CMD_HANDOVER = 4
+#: Drill drop: the NEXT rematch places a fighter airborne at (x, y) with a
+#: damage value instead of on its spawn at 0 %.  arg0/1/2 = float32 bits of
+#: x, y, damage; arg3 bit0 = helpless fall instead of fall, bit1 = slot.
+CMD_DRILL_DROP = 5
+#: Cancel a pending drill drop.
+CMD_DRILL_CLEAR = 6
 
 CMD_NAMES = {
     CMD_NONE: "none",
@@ -131,6 +137,8 @@ CMD_NAMES = {
     CMD_SET_PAD: "set_pad",
     CMD_CLEAR_PAD: "clear_pad",
     CMD_HANDOVER: "handover",
+    CMD_DRILL_DROP: "drill_drop",
+    CMD_DRILL_CLEAR: "drill_clear",
 }
 
 # ``set_pad`` arg1 is fed straight to the synthetic XInput pad in the runtime

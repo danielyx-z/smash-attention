@@ -126,7 +126,10 @@ class RecoveryDrillEnv:
                  settle_steps: int = 2, recovery_bonus: float = 0.5,
                  attempts: int = 3, settle_reset_steps: int = 90,
                  drill_prob: float = 1.0, handoff_y_range: tuple = (-60.0, -10.0),
-                 log=None):
+                 log=None, teleport: bool = False,
+                 damage_range: tuple = (0.0, 100.0), helpless_prob: float = 0.3,
+                 jump_spent_prob: float = 0.3, x_range: tuple = (95.0, 140.0),
+                 drill_max_steps: int = 0):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
         self.settle_steps = max(1, int(settle_steps))
@@ -139,6 +142,15 @@ class RecoveryDrillEnv:
         lo, hi = sorted(float(v) for v in handoff_y_range)
         self.handoff_y_range = (lo, hi)
         self.log = log or (lambda *_a, **_k: None)
+        # teleport: the runtime drops P1 airborne offstage with some damage
+        # (no scripted run-off, no settle wait); helpless = Up-B already spent,
+        # jump_spent = the midair jump already used.
+        self.teleport = bool(teleport)
+        self.damage_range = tuple(float(v) for v in damage_range)
+        self.helpless_prob = float(helpless_prob)
+        self.jump_spent_prob = float(jump_spent_prob)
+        self.x_range = tuple(float(v) for v in x_range)
+        self.drill_max_steps = max(0, int(drill_max_steps))   # 0 = env max
         self._drill = True
         self.setup_observations: list[np.ndarray] = []
         self.setup_action: dict | None = None
@@ -240,7 +252,52 @@ class RecoveryDrillEnv:
         self._steps = 0
         return obs, info
 
+    def _reset_teleport(self, seed: int | None):
+        """Drop P1 offstage in one reset: no run-off, no settle wait."""
+        rng = np.random.default_rng(None if seed is None else int(seed) + 7919)
+        side = -1.0 if rng.random() < 0.5 else 1.0
+        x = side * float(rng.uniform(*self.x_range))
+        y = float(rng.uniform(*self.handoff_y_range))
+        damage = float(rng.uniform(*self.damage_range))
+        helpless = bool(rng.random() < self.helpless_prob)
+        spend_jump = (not helpless) and bool(rng.random() < self.jump_spent_prob)
+        base = self.base_env
+        base.drill_drop = {"x": x, "y": y, "damage": damage,
+                           "helpless": helpless}
+        result = self.env.reset(seed=seed)
+        obs, info = _split_reset(result)
+        fighter = _ego(info, self.ego_slot)
+        if not fighter or not is_offstage(info, self.ego_slot):
+            raise DrillSetupError(
+                "recovery drill: the drop did not leave P1 offstage "
+                f"(y={_num(fighter, 'y'):+.1f})")
+        observations: list[np.ndarray] = []
+        action = _neutral(0.0)
+        if spend_jump:
+            # one tap of jump toward the stage uses the midair jump
+            action = _neutral(-side)
+            action["buttons"][2] = 1.0                 # X = jump
+            result = self.env.step(action)
+            obs2, _r, terminated, truncated, info = _split_step(result)
+            observations.append(np.asarray(obs, np.float32))
+            obs = obs2
+            if terminated or truncated:
+                raise DrillSetupError("recovery drill: ended during the drop")
+        self.setup_observations = observations
+        self.setup_action = action
+        self._was_offstage = True
+        self._prev_rebirth = _flag(_ego(info, self.ego_slot), "is_on_rebirth")
+        self._ground_steps = 0
+        self._steps = 0
+        f = _ego(info, self.ego_slot)
+        self.log(f"[drill] drop x={_num(f, 'x'):+.1f} y={_num(f, 'y'):+.1f} "
+                 f"damage {damage:.0f} helpless {int(helpless)} "
+                 f"jump_spent {int(spend_jump)}")
+        return obs, info
+
     def _reset_once(self, seed: int | None):
+        if self.teleport:
+            return self._reset_teleport(seed)
         result = self.env.reset(seed=seed)
         obs, info = _split_reset(result)
         fighter = _ego(info, self.ego_slot)
@@ -330,6 +387,7 @@ class RecoveryDrillEnv:
             self._ground_steps = 0
         self._prev_rebirth = rebirth
         self._steps += 1
-        if not terminated and not truncated and self._steps >= self.max_steps:
+        limit = self.drill_max_steps or self.max_steps
+        if not terminated and not truncated and self._steps >= limit:
             truncated = True
         return obs, reward, bool(terminated), bool(truncated), info

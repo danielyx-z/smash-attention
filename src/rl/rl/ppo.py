@@ -490,7 +490,8 @@ def _episode_row(info: dict, length: int, ret: float,
                  deaths: dict | None = None,
                  totals: dict | None = None,
                  death_rewards: list | None = None,
-                 death_infos: list | None = None) -> dict:
+                 death_infos: list | None = None,
+                 ledge_grabs: int = 0) -> dict:
     """Summarize one episode.
 
     The last info frame can be a respawn with damage reset to 0, so the final
@@ -518,6 +519,7 @@ def _episode_row(info: dict, length: int, ret: float,
             "p2_deaths": int(deaths.get("p2", 0)),
             "death_rewards": [float(x) for x in (death_rewards or [])],
             "death_infos": list(death_infos or []),
+            "ledge_grabs": int(ledge_grabs),
             "terminated": bool(terminated), "truncated": bool(truncated)}
 
 
@@ -545,6 +547,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     on_reset_error=None,
                     on_step_error=None) -> tuple[dict, list[dict]]:
     """Run the live env, returning flat transition arrays and episode rows."""
+    from rl.memory import status_kinds as status_kinds_mod
     model.eval()
     windows, prevs, actions, logps, values, rewards = [], [], [], [], [], []
     next_windows, next_prevs, terminals, truncateds = [], [], [], []
@@ -566,6 +569,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
     ep_len = 0
     ep_dealt = 0.0
     ep_taken = 0.0
+    ep_ledge = 0
+    prev_ledge = False
     max_steps = int(getattr(env, "max_steps", 0) or 0)
     peak = {"p1_damage": 0.0, "p2_damage": 0.0}
     prev_rebirth = _rebirth_flags(info)
@@ -601,6 +606,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             ep_len = 0
             ep_dealt = 0.0
             ep_taken = 0.0
+            ep_ledge, prev_ledge = 0, False
             peak = {"p1_damage": 0.0, "p2_damage": 0.0}
             prev_rebirth = _rebirth_flags(info)
             prev_damages = _damages(info)
@@ -641,7 +647,12 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
                     death_infos.append(classify_death(list(ego_hist)))
                 else:
                     death_rewards.append(float(reward))
-        ego_hist.append(_ego_snapshot(info, ego_slot_id))
+        snap_now = _ego_snapshot(info, ego_slot_id)
+        on_ledge = snap_now.get("state") in status_kinds_mod.LEDGE_KINDS
+        if on_ledge and not prev_ledge:
+            ep_ledge += 1
+        prev_ledge = on_ledge
+        ego_hist.append(snap_now)
         prev_rebirth = curr_rebirth
         curr_damages = _damages(info)
         ep_taken += max(0.0, curr_damages[0] - prev_damages[0])
@@ -663,7 +674,8 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             row = _episode_row(
                 info, ep_len, ep_ret, terminated, truncated, peak, deaths,
                 totals={"dealt": ep_dealt, "taken": ep_taken},
-                death_rewards=death_rewards, death_infos=death_infos)
+                death_rewards=death_rewards, death_infos=death_infos,
+                ledge_grabs=ep_ledge)
             episodes.append(row)
             if on_episode is not None:
                 on_episode(row)
@@ -674,6 +686,7 @@ def collect_rollout(env, model, state: PolicyState, cfg: bc.BCConfig,
             ep_len = 0
             ep_dealt = 0.0
             ep_taken = 0.0
+            ep_ledge, prev_ledge = 0, False
             peak = {"p1_damage": 0.0, "p2_damage": 0.0}
             prev_rebirth = _rebirth_flags(info)
             prev_damages = _damages(info)
@@ -1129,6 +1142,18 @@ def main(argv: list[str] | None = None) -> int:
                          "the drill setup")
     ap.add_argument("--recovery-bonus", type=float, default=0.5,
                     help="reward added when the drill returns to the ground")
+    ap.add_argument("--drill-teleport", action="store_true",
+                    help="runtime drops P1 offstage in one reset (no scripted "
+                         "run-off / settle wait) with random damage")
+    ap.add_argument("--drill-damage-max", type=float, default=100.0,
+                    help="teleport drill: damage percent drawn from [0, max]")
+    ap.add_argument("--drill-helpless-prob", type=float, default=0.3,
+                    help="teleport drill: start helpless (Up-B already spent)")
+    ap.add_argument("--drill-jump-spent-prob", type=float, default=0.3,
+                    help="teleport drill: start with the midair jump used")
+    ap.add_argument("--drill-max-steps", type=int, default=0,
+                    help="cap a drill episode at this many decisions "
+                         "(0 = the env max)")
     ap.add_argument("--drill-prob", type=float, default=1.0,
                     help="fraction of episodes that use the recovery drill "
                          "(1 = drill only, 0 = normal episodes)")
@@ -1331,9 +1356,16 @@ def main(argv: list[str] | None = None) -> int:
                     recovery_bonus=float(args.recovery_bonus),
                     drill_prob=float(args.drill_prob),
                     handoff_y_range=(args.drill_min_y, args.drill_max_y),
-                    log=log)
-                log("[ppo] recovery drill: run P1 off the ledge, then hand "
-                    "control to the policy mid-fall")
+                    log=log, teleport=bool(args.drill_teleport),
+                    damage_range=(0.0, float(args.drill_damage_max)),
+                    helpless_prob=float(args.drill_helpless_prob),
+                    jump_spent_prob=float(args.drill_jump_spent_prob),
+                    drill_max_steps=int(args.drill_max_steps))
+                log("[ppo] recovery drill: "
+                    + ("the runtime drops P1 offstage with random damage"
+                       if args.drill_teleport else
+                       "run P1 off the ledge")
+                    + ", then hand control to the policy mid-fall")
 
         if args.mirror:
             from rl.rl.mirror import MirrorWrapper
@@ -1394,7 +1426,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"rew {float(row.get('return', 0.0)):+.3f} "
                 f"deaths P1 {row.get('p1_deaths', 0)}/"
                 f"P2 {row.get('p2_deaths', 0)} "
-                f"death_rew {row.get('death_rewards', [])}")
+                f"death_rew {row.get('death_rewards', [])} "
+                f"ledge {row.get('ledge_grabs', 0)}")
             for d in row.get("death_infos", []):
                 log("[ppo] death: " + " ".join(f"{k}={v}" for k, v in d.items()))
 

@@ -959,6 +959,45 @@ class SSBUGymEnv(gym.Env):
         self._wait_tagged(self._gate.advance(2), timeout=self.reset_timeout)
         self._neutralise_input()
 
+    #: Set by a training wrapper before ``reset()``: ``{"x", "y", "damage",
+    #: "helpless"}`` makes the runtime start the episode with the ego airborne
+    #: there (a recovery drill) instead of on its spawn.  One-shot.
+    drill_drop: dict | None = None
+    _drop_sent = False
+
+    def _send_drill_drop(self) -> None:
+        import struct
+        from rl.input import control_block as cb
+        control = getattr(self._lock_reset, "control", None)
+        drop, self.drill_drop = self.drill_drop, None
+        if control is None or not hasattr(control, "send_command"):
+            return
+        if drop is not None or self._drop_sent:
+            if hasattr(control, "open"):
+                control.open()                       # idempotent; request() does it too
+        if drop is None:
+            if self._drop_sent:                        # a stale, unconsumed drop
+                control.send_command(cb.CMD_DRILL_CLEAR)
+                self._drop_sent = False
+            return
+        bits = [struct.unpack("<I", struct.pack("<f", float(drop[k])))[0]
+                for k in ("x", "y", "damage")]
+        flags = (1 if drop.get("helpless") else 0) | (int(self.ego_slot) << 1)
+        control.send_command(cb.CMD_DRILL_DROP, bits[0], bits[1], bits[2], flags)
+        self._drop_sent = True
+
+    def _dropped_start(self, snap: RawSnapshot) -> bool:
+        """A drill drop is live: ego airborne below the stage, not respawning."""
+        fighters = snap.fighters
+        if len(fighters) <= max(self.ego_slot, 1):
+            return False
+        ego = fighters[self.ego_slot]
+        opp = fighters[1 - self.ego_slot]
+        return (int(ego.get("on_ground", 0)) == 0
+                and int(ego.get("is_on_rebirth", 0)) == 0
+                and int(opp.get("is_on_rebirth", 0)) == 0
+                and float(ego.get("y", 0.0)) < -10.0)
+
     def _clean_start(self, snap: RawSnapshot) -> bool:
         """Is this a state an episode can sensibly start from?
 
@@ -990,7 +1029,10 @@ class SSBUGymEnv(gym.Env):
         gate = self._gate
         gate.release()                          # the rematch needs a running game
         gate.arm_reset(self._lock_park, self._lock_seed)
+        dropped = self.drill_drop is not None
+        self._send_drill_drop()
         self._lock_reset.reset(timeout=self.reset_timeout)
+        self._drop_sent = False                         # the reset consumed it
         frame = gate.wait_parked(timeout=self.reset_timeout)
         snap = self._wait_tagged(frame, timeout=self.reset_timeout)
         advanced = 0
@@ -1022,7 +1064,8 @@ class SSBUGymEnv(gym.Env):
                     still, seen_motion = 0, True
             last_sig = sig
             if (seen_motion and self._ready_for_reset(snap)
-                    and self._clean_start(snap)):
+                    and (self._dropped_start(snap) if dropped
+                         else self._clean_start(snap))):
                 break
             if advanced >= max_frames:
                 gate.release()
