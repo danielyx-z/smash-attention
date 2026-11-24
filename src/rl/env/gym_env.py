@@ -980,6 +980,11 @@ class SSBUGymEnv(gym.Env):
                 control.send_command(cb.CMD_DRILL_CLEAR)
                 self._drop_sent = False
             return
+        if drop.get("vx") is not None:
+            lb = [struct.unpack("<I", struct.pack("<f", float(drop[k])))[0]
+                  for k in ("vx", "vy")]
+            control.send_command(cb.CMD_DRILL_LAUNCH, lb[0], lb[1],
+                                 int(drop.get("status", 0) or 0), 1)
         bits = [struct.unpack("<I", struct.pack("<f", float(drop[k])))[0]
                 for k in ("x", "y", "damage")]
         flags = (1 if drop.get("helpless") else 0) | (int(self.ego_slot) << 1)
@@ -1028,8 +1033,13 @@ class SSBUGymEnv(gym.Env):
         """
         gate = self._gate
         gate.release()                          # the rematch needs a running game
-        gate.arm_reset(self._lock_park, self._lock_seed)
         dropped = self.drill_drop is not None
+        park = self._lock_park
+        if dropped and self.drill_drop.get("vx") is not None:
+            # the launch speed is applied 1 frame after the reset and takes
+            # effect on the next: park after it so the first observation has it
+            park = max(int(park), 3)
+        gate.arm_reset(park, self._lock_seed)
         self._send_drill_drop()
         self._lock_reset.reset(timeout=self.reset_timeout)
         self._drop_sent = False                         # the reset consumed it

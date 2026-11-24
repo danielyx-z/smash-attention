@@ -97,6 +97,31 @@ class TeleportDrillTest(unittest.TestCase):
             self.assertTrue(85.0 <= abs(d["x"]) <= 100.0)
             self.assertTrue(-35.0 <= d["y"] <= -15.0)
 
+    def test_launch_drops_go_outward_from_near_the_stage_in_hitstun(self):
+        base, env = self._env(helpless_prob=0.0, launch_prob=1.0,
+                              launch_hitstun_prob=1.0, jump_spent_prob=1.0,
+                              launch_hitstun_steps=(2, 4))
+        steps = []
+        orig = base.step
+        base.step = lambda a: (steps.append(a), orig(a))[1]
+        for s in range(30):
+            env.reset(seed=s)
+        for d in base.drops:
+            self.assertLess(d["vx"], 0.0)                     # outward, facing frame
+            self.assertTrue(-2.5 <= d["vx"] <= -0.8)
+            self.assertTrue(90.0 <= d["x"] <= 110.0)        # right side only
+            self.assertEqual(d.get("status", 0), 0)            # plain fall
+        # hitstun = neutral steps, no jump button among them
+        self.assertTrue(all(float(a["buttons"].sum()) == 0.0 for a in steps))
+        self.assertTrue(2 * 30 <= len(steps) <= 4 * 30)
+        self.assertGreaterEqual(len(env.setup_observations), 2)
+
+    def test_launch_off_by_default(self):
+        base, env = self._env(helpless_prob=0.0)
+        for s in range(20):
+            env.reset(seed=s)
+        self.assertTrue(all("vx" not in d for d in base.drops))
+
     def test_helpless_start_never_spends_a_jump(self):
         base, env = self._env(helpless_prob=1.0, jump_spent_prob=1.0)
         env.reset(seed=1)

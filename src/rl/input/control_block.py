@@ -130,6 +130,10 @@ CMD_HANDOVER = 4
 CMD_DRILL_DROP = 5
 #: Cancel a pending drill drop.
 CMD_DRILL_CLEAR = 6
+#: Launch for the next drill drop: arg0/arg1 = float32 bits of the x / y speed
+#: (game units per frame, applied one frame after the reset), arg2 = status id
+#: to start in (0 = fall / helpless fall), arg3 = 1 to enable.  One-shot.
+CMD_DRILL_LAUNCH = 8
 
 CMD_NAMES = {
     CMD_NONE: "none",
@@ -139,6 +143,7 @@ CMD_NAMES = {
     CMD_HANDOVER: "handover",
     CMD_DRILL_DROP: "drill_drop",
     CMD_DRILL_CLEAR: "drill_clear",
+    CMD_DRILL_LAUNCH: "drill_launch",
 }
 
 # ``set_pad`` arg1 is fed straight to the synthetic XInput pad in the runtime

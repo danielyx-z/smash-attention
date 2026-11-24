@@ -131,7 +131,14 @@ class RecoveryDrillEnv:
                  jump_spent_prob: float = 0.3, x_range: tuple = (95.0, 140.0),
                  drill_max_steps: int = 0,
                  helpless_x_range: tuple = (85.0, 100.0),
-                 helpless_y_range: tuple = (-35.0, -15.0)):
+                 helpless_y_range: tuple = (-35.0, -15.0),
+                 launch_prob: float = 0.0,
+                 launch_speed: tuple = (0.8, 2.5),
+                 launch_vy: tuple = (-0.5, 1.5),
+                 launch_x_range: tuple = (90.0, 110.0),
+                 launch_y_range: tuple = (-45.0, -10.0),
+                 launch_hitstun_prob: float = 0.8,
+                 launch_hitstun_steps: tuple = (2, 6)):
         self.env = env
         self.setup_steps = max(1, int(setup_steps))
         self.settle_steps = max(1, int(settle_steps))
@@ -157,6 +164,22 @@ class RecoveryDrillEnv:
         # drops died, 6 % grabbed the ledge), so those drops teach nothing but
         # noise.  Keep them to a zone close to the ledge where a ledge grab is
         # possible.
+        # Launch drops: how a stock is really lost.  The fighter starts nearer
+        # the stage and is thrown outward at ``launch_speed`` (game units per
+        # frame); with ``launch_hitstun_prob`` the first few decisions are
+        # neutral input (the policy does not act yet), standing in for hitstun.
+        # Verified live: the x speed is in the fighter's facing frame (it faces
+        # the stage centre after the reset), so outward is negative.  A real
+        # damage status (72) was tried and dropped: it keeps the motion of the
+        # fighter's previous hit, so 4 of 16 drops flew inward at random.
+        self.launch_prob = float(launch_prob)
+        self.launch_speed = tuple(float(v) for v in launch_speed)
+        self.launch_vy = tuple(float(v) for v in launch_vy)
+        self.launch_x_range = tuple(float(v) for v in launch_x_range)
+        self.launch_y_range = tuple(float(v) for v in launch_y_range)
+        self.launch_hitstun_prob = float(launch_hitstun_prob)
+        self.launch_hitstun_steps = (int(launch_hitstun_steps[0]),
+                                     int(launch_hitstun_steps[1]))
         self.helpless_x_range = tuple(float(v) for v in helpless_x_range)
         self.helpless_y_range = tuple(float(v) for v in helpless_y_range)
         self.drill_max_steps = max(0, int(drill_max_steps))   # 0 = env max
@@ -274,9 +297,27 @@ class RecoveryDrillEnv:
         damage = self.damage_range[0] + damage_u * (self.damage_range[1]
                                                     - self.damage_range[0])
         spend_jump = (not helpless) and bool(rng.random() < self.jump_spent_prob)
+        launch = (not helpless) and bool(rng.random() < self.launch_prob)
+        hitstun_steps = 0
+        drop = {"x": x, "y": y, "damage": damage, "helpless": helpless}
+        if launch:
+            speed = float(rng.uniform(*self.launch_speed))
+            # Right side only: a launched drop on the left side lands at a
+            # wrong, positive x in the live game (cause not found; plain
+            # drops and right-side launches are fine).  The mirror wrapper
+            # shows the policy both sides anyway.
+            drop["x"] = float(rng.uniform(*self.launch_x_range))
+            drop["y"] = float(rng.uniform(*self.launch_y_range))
+            drop["vx"] = -speed                       # outward (facing frame)
+            drop["vy"] = float(rng.uniform(*self.launch_vy))
+            hitstun = bool(rng.random() < self.launch_hitstun_prob)
+            hitstun_steps = (int(rng.integers(self.launch_hitstun_steps[0],
+                                              self.launch_hitstun_steps[1] + 1))
+                             if hitstun else 0)
+            if hitstun:
+                spend_jump = False                    # cannot act yet
         base = self.base_env
-        base.drill_drop = {"x": x, "y": y, "damage": damage,
-                           "helpless": helpless}
+        base.drill_drop = drop
         result = self.env.reset(seed=seed)
         obs, info = _split_reset(result)
         fighter = _ego(info, self.ego_slot)
@@ -286,6 +327,14 @@ class RecoveryDrillEnv:
                 f"(y={_num(fighter, 'y'):+.1f})")
         observations: list[np.ndarray] = []
         action = _neutral(0.0)
+        for _ in range(hitstun_steps):               # "hitstun": no input yet
+            result = self.env.step(action)
+            obs2, _r, terminated, truncated, info = _split_step(result)
+            observations.append(np.asarray(obs, np.float32))
+            obs = obs2
+            if terminated or truncated or _flag(_ego(info, self.ego_slot),
+                                                 "is_on_rebirth"):
+                raise DrillSetupError("recovery drill: ended during the launch")
         if spend_jump:
             # one tap of jump toward the stage uses the midair jump
             action = _neutral(-side)
@@ -305,7 +354,9 @@ class RecoveryDrillEnv:
         f = _ego(info, self.ego_slot)
         self.log(f"[drill] drop x={_num(f, 'x'):+.1f} y={_num(f, 'y'):+.1f} "
                  f"damage {damage:.0f} helpless {int(helpless)} "
-                 f"jump_spent {int(spend_jump)}")
+                 f"jump_spent {int(spend_jump)}"
+                 + (f" launch {-drop['vx']:.1f} hitstun_steps {hitstun_steps}"
+                    if launch else ""))
         return obs, info
 
     def _reset_once(self, seed: int | None):
